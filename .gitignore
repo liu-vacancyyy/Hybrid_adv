@@ -1,0 +1,75 @@
+# Git / editor local state
+.git/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.codex
+.codex/
+_smoke_*.py
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Training outputs, checkpoints, logs
+runs/
+scripts/runs/
+algorithms/**/runs/
+algorithms/**/runs_*/
+algorithms/**/checkpoints/
+algorithms/**/checkpoints_*/
+wandb/
+logs/
+*.log
+*.ckpt
+actor_*.pt
+critic_*.pt
+adv_actor_*.pt
+adv_critic_*.pt
+dagger_latest.pt
+*.onnx
+events.out.tfevents*
+
+# Render / evaluation outputs
+renders/result/
+renders/results/
+renders/result_old/
+renders/output/
+renders/outputs/
+renders/tracks/
+tracks/
+*.mp4
+*.avi
+*.mov
+*.gif
+
+# Generated datasets and numeric experiment dumps
+data/
+example/data/
+*.npy
+*.npz
+
+# Local simulator / external dependency folders
+envs/jsbsim/
+HybridPlane/
+
+# Keep small source model assets required by the F16 aero model.
+!envs/models/F16/model/*.pth
+!envs/models/F16/model/*.csv

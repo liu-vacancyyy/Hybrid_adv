@@ -1,0 +1,74 @@
+# atmos config
+airspeed: 0
+noise_scale: 0.01
+
+# simulation config
+solver: euler
+dt: 0.02
+num_agents: 1
+num_states: 12
+num_controls: 5
+num_actions: 5
+num_observation: 22
+
+# aircraft config
+altitude_limit: 0.2
+acceleration_limit: 2.5
+max_velocity: 10          # m/s
+min_y_velocity: 2       # m/s
+min_alpha: -10             # 度
+max_alpha: 20             # 度
+min_beta: -15
+max_beta: 15
+max_omega: 2      #rad/s
+max_pitch: 25     #度
+max_roll: 30     #度
+color: Red
+model: hybrid
+
+# target config
+max_check_interval: 1000                 # step
+
+# ============================================================
+# Human-like RC command generator (envs/tasks/rc_task.py)
+# Each command channel runs an OU process pulled toward a piecewise-constant
+# mu; mu is resampled every dwell ~ U(dwell_min, dwell_max) steps to mimic
+# a pilot setting / holding / changing stick position.
+# Heading is the integral of an OU yaw-rate command (humans push the rudder
+# stick which produces a yaw-rate, not an absolute heading).
+# ============================================================
+rc_ou_theta_vel:  0.35             # slower mean reversion; easier early tracking
+rc_ou_theta_yaw:  0.45
+rc_ou_sigma_vx:   0.12             # lower command noise; reduce target jitter
+rc_ou_sigma_vz:   0.10
+rc_ou_sigma_yawr: 0.08
+rc_max_vx:       1.5               # m/s   stick saturation
+rc_max_vz:       1.0               # m/s
+rc_max_yaw_rate: 0.25              # rad/s (~14 deg/s)
+rc_mu_vx_range:       1.5          # mu ~ U(-range, +range) for vx
+rc_mu_vz_range:       0.9          # mu ~ U(-range, +range) for vz
+rc_mu_yaw_rate_range: 0.18         # mu ~ U(-range, +range) for yaw_rate
+rc_dwell_min_steps: 250            # 5.0 s @ 50 Hz: shortest stick-hold
+rc_dwell_max_steps: 700            # 14.0 s @ 50 Hz: longest stick-hold
+rc_alt_high: 95.0                  # m, soft fence: stop pushing vz>0 above this
+rc_alt_low:   5.0                  # m, soft fence: stop pushing vz<0 below this
+
+# ============================================================
+# RC reward — envs/reward_functions/rc_reward.py
+# Each shaped term is exp(-x^2 / sigma^2) ∈ [0, 1].
+# Max per-step reward = w_alive + sum(w_*) ≈ 10.5
+# ============================================================
+rc_w_alive: 0.2
+rc_w_vx: 3.0
+rc_w_vz: 3.0
+rc_w_heading: 2.0
+rc_w_attitude: 1.0
+rc_w_omega: 0.5
+rc_w_smooth: 0.8
+
+rc_sig_vx: 0.45                    # m/s; tighter tracking signal
+rc_sig_vz: 0.35                    # m/s
+rc_sig_yaw: 0.18                   # rad
+rc_sig_attitude: 0.22              # rad
+rc_sig_omega: 1.5                  # rad/s
+rc_sig_smooth: 1.0                 # N^2 sum over 5 motors; stronger smoothness pressure

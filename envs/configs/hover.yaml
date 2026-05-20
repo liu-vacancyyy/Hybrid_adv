@@ -1,0 +1,133 @@
+# Hover task config for the HybridModel (QuadPlane)
+# Holds the (npos, epos, altitude, heading) state captured at spawn.
+
+# atmos
+airspeed: 0
+noise_scale: 0.01
+
+# HYBRID_NEW wind/gust config. Components are NED/world-frame m/s.
+# Wind is ignored unless both the model is HYBRID_NEW/HYBRID_WIND and
+# enable_wind is true.
+enable_wind: false
+wind_north: 0.0
+wind_east: 0.0
+wind_down: 0.0
+gust_north: 0.0
+gust_east: 0.0
+gust_down: 0.0
+gust_speed: 0.0
+gust_direction_deg: 0.0
+
+# Reduced Dryden turbulence for hover PID / policy robustness tests.
+# The paper-level reference was 1.5 m/s; this config intentionally starts
+# softer so the controller can be evaluated before increasing wind strength.
+enable_dryden_turbulence: false
+dryden_sigma_ref: 0.3
+dryden_domain_randomization: true
+dryden_sigma_scale_min: 0.5
+dryden_sigma_scale_max: 0.8
+dryden_airspeed_min: 1.0
+dryden_airspeed_max: 8.0
+dryden_altitude_min: 5.0
+dryden_altitude_max: 120.0
+dryden_length_scale_min: 0.7
+dryden_length_scale_max: 1.3
+dryden_random_direction: true
+dryden_direction_deg: 0.0
+
+# simulation
+solver: euler
+dt: 0.02
+max_steps: 1500             # episode length: 30s @ dt=0.02
+num_agents: 1
+num_states: 12
+num_controls: 5
+num_actions: 5
+num_observation: 24
+hover_pos_norm: 5.0
+hover_alt_norm: 2.0
+
+# aircraft hard limits (used by termination conditions)
+altitude_limit: 0.2          # m
+acceleration_limit: 5.0      # g
+max_velocity: 10             # m/s
+min_y_velocity: 0            # not used in hover
+min_alpha: -45               # deg
+max_alpha: 45                # deg
+min_beta: -30                # deg
+max_beta: 30                 # deg
+max_omega: 2                 # rad/s  (~115 deg/s, LearningToFly reference)
+max_pitch: 35                # deg
+max_roll: 35                 # deg
+color: Blue
+model: hybrid
+
+# ============================================================
+# Spawn / domain randomisation / sensor noise
+# ============================================================
+
+# ----- Model spawn altitude range (xy is always 0) -----
+min_altitude: 4.0    # m
+max_altitude: 50.0   # m   z ~ U(min_altitude, max_altitude)
+
+# ----- Domain randomisation -----
+# Body dynamics: each reset scales nominal by U(1-noise, 1+noise)
+dr_mass:    0.05    # ±5 %
+dr_inertia: 0.20    # ±20 % on each diagonal inertia element
+
+# ----- Initial state perturbation (UNIFORM, applied in HybridModel.reset) -----
+# roll  ~  U(-init_roll_range,  +init_roll_range)
+# pitch ~  U(-init_pitch_range, +init_pitch_range)
+# yaw   ~  U(-init_yaw_range,   +init_yaw_range)
+# vel   ~  U(-init_vel_range,   +init_vel_range)   per body axis  (m/s)
+# omega ~  U(-init_omega_range, +init_omega_range) per body axis  (rad/s)
+init_roll_range:  0.031415926535   # 0.01 * pi  rad
+init_pitch_range: 0.031415926535   # 0.01 * pi  rad
+init_yaw_range:   3.141592653590   #     pi    rad
+init_vel_range:   0.1              # m/s
+init_omega_range: 0.02             # rad/s
+
+# ----- Sensor noise (zero-mean Gaussian, NO bias) -----
+# Applied in HoverTask._build_obs when add_sensor_noise=True.
+# get_clean_obs(env) bypasses noise and is used by the privileged expert.
+enable_sensor_noise: true
+sensor_pos_std:   1.0       # m      noise on N/E/altitude position
+sensor_vel_std:   0.05      # m/s    noise on body-frame linear velocity
+sensor_att_std:   0.005     # rad    noise on roll / pitch / yaw
+sensor_omega_std: 0.0005    # rad/s  noise on body-frame angular rate
+
+# ============================================================
+# Hover reward — see envs/reward_functions/hover_reward.py
+# Each shaped term is exp(-x^2 / sigma^2) ∈ [0, 1] and is weighted
+# below.  Max per-step shaped reward (sum of weights below, w/o alive)
+# ≈ 6.6, total per-step ≈ 6.8.
+# ============================================================
+hover_w_alive: 0.2          # was 0.5; keep small so shaped terms drive learning
+hover_w_xy: 3.0
+hover_w_alt: 1.5
+hover_w_yaw: 0.8
+hover_w_attitude: 1.0
+hover_w_vel: 1.0
+hover_w_omega: 0.5
+hover_w_smooth: 0.8         # keep motor commands quiet; RL was visibly noisier than DAgger
+
+# hover reward sigma (exp(-x^2/sigma^2))
+hover_sig_xy: 1.5                  # m   tighter position holding
+hover_sig_alt: 0.5                 # m
+hover_sig_yaw: 0.2                 # rad
+hover_sig_attitude: 0.2            # rad (was 0.3 — keeps level posture tighter)
+hover_sig_vel: 1.5                 # m/s (was 1.0 — give recovery velocity room)
+hover_sig_omega: 1.5               # rad/s (was 1.0)
+hover_sig_smooth: 1.0              # N^2 sum over 5 motors; lower means stronger smoothness pressure
+
+# ============================================================
+# Hover event reward — envs/reward_functions/hover_event_driven_reward.py
+# bad_done: penalty grows with remaining steps so an early crash hurts more
+#           than a late crash.  total_pen = base + per_step * remaining
+# done/timeout: no terminal reward
+# ============================================================
+hover_bad_done_base:     50.0
+hover_bad_done_per_step:  3.0
+
+# misc
+max_check_interval: 1000

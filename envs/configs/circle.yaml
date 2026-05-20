@@ -1,0 +1,132 @@
+# Circle trajectory task for the HybridModel (QuadPlane).
+# The aircraft follows a moving target on a 10 m horizontal circle.
+# Centre is 10 m to the body-left of the spawn point, so the initial
+# aircraft-centre line is perpendicular to the initial heading.
+
+# atmos
+airspeed: 0                  # legacy HYBRID only; HYBRID_NEW ignores this shortcut
+
+# HYBRID_NEW wind/gust config.  Components are NED/world-frame m/s.
+# Wind is ignored unless both the model is HYBRID_NEW/HYBRID_WIND and
+# enable_wind is true.
+# Positive wind_north/east/down means the air mass moves toward that axis.
+# gust_speed/gust_direction_deg is a horizontal convenience form where
+# 0 deg points north and 90 deg points east.
+enable_wind: false
+wind_north: 0.0
+wind_east: 0.0
+wind_down: 0.0
+gust_north: 0.0
+gust_east: 0.0
+gust_down: 0.0
+gust_speed: 0.0
+gust_direction_deg: 0.0
+
+# Environment-level Dryden turbulence.  The referenced paper uses Dryden wind
+# turbulence with sigma = 1.5 m/s; this config intentionally starts softer so
+# the controller can be evaluated before increasing wind strength.
+enable_dryden_turbulence: false
+dryden_sigma_ref: 0.3
+dryden_domain_randomization: true
+dryden_sigma_scale_min: 0.5
+dryden_sigma_scale_max: 0.8
+dryden_airspeed_min: 1.0
+dryden_airspeed_max: 8.0
+dryden_altitude_min: 5.0
+dryden_altitude_max: 120.0
+dryden_length_scale_min: 0.7
+dryden_length_scale_max: 1.3
+dryden_random_direction: true
+dryden_direction_deg: 0.0
+
+# simulation
+solver: euler
+dt: 0.02
+max_steps: 2000               # episode length: 40 s @ dt=0.02 (= 1 full circle)
+num_agents: 1
+num_states: 12
+num_controls: 5
+num_actions: 5
+num_observation: 28
+hover_pos_norm: 5.0
+hover_alt_norm: 2.0
+
+# aircraft hard limits (used by termination conditions)
+altitude_limit: 0.2          # m
+acceleration_limit: 5.0      # g
+max_velocity: 10             # m/s
+max_y_velocity: 2.5          # m/s, lateral body velocity limit
+min_y_velocity: 0
+min_alpha: -45               # deg
+max_alpha: 45                # deg
+min_beta: -30                # deg
+max_beta: 30                 # deg
+max_omega: 4                 # rad/s
+max_pitch: 35                # deg
+max_roll: 35                 # deg
+color: Blue
+model: hybrid
+
+# ---------- circle trajectory ----------
+circle_radius: 10.0           # m
+circle_offset_left: 10.0      # m, centre offset to body-left of spawn
+circle_period: -40.0          # s; negative -> initial tangent follows initial heading. Tangential speed = 2*pi*R/abs(period) (~1.57 m/s)
+circle_face_tangent: true     # if true, target_heading is tangent to the circle
+circle_include_target_motion: true
+circle_target_vel_norm: 2.0   # m/s; target tangent speed is ~1.57 m/s at R=10,T=40
+circle_target_acc_norm: 2.0   # m/s^2; target centripetal accel is ~0.25 m/s^2
+
+# ============================================================
+# Spawn / domain randomisation / sensor noise
+# ============================================================
+
+min_altitude: 4.0
+max_altitude: 50.0
+
+dr_mass:    0.05
+dr_inertia: 0.20
+
+init_roll_range:  0.031415926535
+init_pitch_range: 0.031415926535
+init_yaw_range:   3.141592653590
+init_vel_range:   0.1
+init_omega_range: 0.02
+
+# CircleTask currently uses compact observation Gaussian noise.
+# Keep it small; domain randomisation above already provides harder training.
+noise_scale: 0.01
+enable_sensor_noise: true
+sensor_pos_std:   0.5       # m
+sensor_vel_std:   0.05      # m/s
+sensor_att_std:   0.005     # rad
+sensor_omega_std: 0.0005    # rad/s
+
+# ============================================================
+# Circle reward — envs/reward_functions/circle_reward.py
+# Max shaped reward ≈ sum(weights) = 7.9 per step.
+# ============================================================
+circle_w_alive: 0.2
+circle_w_xy: 3.0
+circle_w_alt: 1.2
+circle_w_yaw: 0.8
+circle_w_vel: 1.2
+circle_w_attitude: 0.6
+circle_w_omega: 0.4
+circle_w_smooth: 0.5
+
+circle_sig_xy: 2.0           # m
+circle_sig_alt: 0.6          # m
+circle_sig_yaw: 0.35         # rad
+circle_sig_vel: 1.0          # m/s, velocity error to moving circle target
+circle_sig_attitude: 0.25    # rad
+circle_sig_omega: 1.5        # rad/s
+circle_sig_smooth: 1.5       # N^2 sum over 5 motors
+
+# ============================================================
+# Circle event reward — envs/reward_functions/circle_event_driven_reward.py
+# ============================================================
+circle_bad_done_base:     50.0
+circle_bad_done_per_step:  3.0
+
+# misc
+max_check_interval: 1000
