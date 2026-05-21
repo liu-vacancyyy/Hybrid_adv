@@ -49,6 +49,8 @@ def parse_args():
     p.add_argument("--cuda", action="store_true", default=True)
     p.add_argument("--n-rollout-threads", type=int, default=256)
     p.add_argument("--num-env-steps", type=float, default=2.0e7)
+    p.add_argument("--max-iterations", type=int, default=1000,
+                   help="Hard cap on PPO update iterations. Set <= 0 to disable.")
     p.add_argument("--buffer-size", type=int, default=256)
     p.add_argument("--log-interval", type=int, default=1)
     p.add_argument("--save-interval", type=int, default=10)
@@ -308,10 +310,23 @@ def main():
     buffer = ReplayBuffer(adv_args, env.num_agents, env.observation_space, env.action_space)
     buffer.obs[0] = t2n(env.reset()).reshape(args.n_rollout_threads, 1, -1)
 
-    episodes = int(float(args.num_env_steps) // args.buffer_size // args.n_rollout_threads)
+    requested_episodes = int(
+        float(args.num_env_steps) // args.buffer_size // args.n_rollout_threads
+    )
+    if requested_episodes <= 0:
+        raise ValueError("num-env-steps is too small for buffer-size * n-rollout-threads")
+    episodes = requested_episodes
+    if args.max_iterations > 0:
+        episodes = min(episodes, int(args.max_iterations))
     logging.info("run_dir=%s", run_dir)
     logging.info("victim=%s", args.victim_ckpt)
-    logging.info("adv_action_dim=%d episodes=%d", env.adv_action_dim, episodes)
+    logging.info(
+        "adv_action_dim=%d iterations=%d requested_iterations=%d max_iterations=%d",
+        env.adv_action_dim,
+        episodes,
+        requested_episodes,
+        args.max_iterations,
+    )
 
     total_steps = 0
     for episode in range(episodes):
@@ -324,15 +339,23 @@ def main():
         if episode % args.log_interval == 0:
             scalars = mean_metrics(metrics)
             scalars.update({f"train/{k}": v for k, v in train_info.items()})
-            scalars["adv/mean_reward"] = float(np.mean(buffer.rewards))
+            reward_mean = float(np.mean(buffer.rewards))
+            rollout_return = float(np.sum(buffer.rewards) / max(args.n_rollout_threads, 1))
+            scalars["adv/mean_reward"] = reward_mean
+            scalars["adv/rollout_return"] = rollout_return
+            scalars["reward/adv_mean_step_reward"] = reward_mean
+            scalars["reward/adv_rollout_return_per_env"] = rollout_return
+            if "adv/policy_reward" in scalars:
+                scalars["reward/victim_mean_step_reward"] = scalars["adv/policy_reward"]
             for k, v in scalars.items():
                 writer.add_scalar(k, v, total_steps)
             logging.info(
-                "episode=%d/%d steps=%d adv_rew=%.3f bad_done=%.3f vel=%.3f yaw=%.3f linf=%.3f",
+                "iteration=%d/%d steps=%d adv_rew=%.3f return=%.3f bad_done=%.3f vel=%.3f yaw=%.3f linf=%.3f",
                 episode,
                 episodes,
                 total_steps,
                 scalars.get("adv/mean_reward", 0.0),
+                scalars.get("adv/rollout_return", 0.0),
                 scalars.get("adv/bad_done_rate", 0.0),
                 scalars.get("adv/vel_error", 0.0),
                 scalars.get("adv/yaw_error", 0.0),
