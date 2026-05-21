@@ -23,7 +23,7 @@ EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_cmd_obs_wind_ep880}"
     --victim-ckpt "${VICTIM_CKPT}" \
     --scenario-name rc_human --model-name HYBRID_NEW --experiment-name "${EXP}" \
     --seed 17 --device "${DEVICE}" --cuda \
-    --n-rollout-threads 1024 --buffer-size 256 --num-env-steps 2.0e7 \
+    --n-rollout-threads 1024 --buffer-size 1500 --num-env-steps 2.0e7 \
     --max-iterations 1000 \
     --log-interval 1 --save-interval 10 \
     --lr 3e-4 --gamma 0.99 --gae-lambda 0.95 \
