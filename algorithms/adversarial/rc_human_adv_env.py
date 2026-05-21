@@ -91,7 +91,7 @@ class RCHumanAdversarialEnv:
         obs = self.env.reset()
         reset = torch.ones(self.n, dtype=torch.bool, device=self.device)
         self._reset_adv_state(reset)
-        if bool(self.args.adv_use_random_command):
+        if self._use_random_command_base():
             self._enable_random_command_if_needed(reset)
             self.env.task.sync_command(self.env)
         else:
@@ -115,6 +115,11 @@ class RCHumanAdversarialEnv:
         self.victim_rnn[mask] = 0.0
         self.victim_masks[mask] = 1.0
 
+    def _use_random_command_base(self):
+        return bool(self.args.adv_use_random_command) or bool(
+            getattr(self.args, "adv_command_random_base", False)
+        )
+
     def _disable_stochastic_sources(self):
         """Make observation noise and wind fully controlled by the adversary."""
         cfg = self.env.config
@@ -130,7 +135,7 @@ class RCHumanAdversarialEnv:
             self.task.enable_sensor_noise = False
         if hasattr(self.task, "stick_noise_std"):
             self.task.stick_noise_std = 0.0
-        if hasattr(self.task, "curriculum_enable") and not bool(self.args.adv_use_random_command):
+        if hasattr(self.task, "curriculum_enable") and not self._use_random_command_base():
             self.task.curriculum_enable = False
 
         if hasattr(self.model, "base_wind_ned"):
@@ -215,35 +220,58 @@ class RCHumanAdversarialEnv:
     def _lowpass_adv(self, new, old, alpha):
         return (1.0 - alpha) * old + alpha * new
 
-    def _apply_command_attack(self, cmd):
+    def _apply_command_attack(self, cmd, update_filter=True):
         if bool(self.args.adv_use_random_command):
             self.env.task.sync_command(self.env)
             return
         task = self.env.task
+        random_base = self._use_random_command_base()
+        if random_base:
+            task.sync_command(self.env)
+            base_vx = task.target_vx.clone()
+            base_vy = task.target_vy.clone()
+            base_vz = task.target_vz.clone()
+            base_yaw_rate = task.target_yaw_rate.clone()
+            base_heading = task.target_heading.clone()
+
         a = float(self.args.adv_command_alpha)
-        self.adv_command = self._lowpass_adv(cmd, self.adv_command, a)
+        if update_filter:
+            self.adv_command = self._lowpass_adv(cmd, self.adv_command, a)
+
+        if random_base:
+            target_vx = base_vx + self.adv_command[:, 0]
+            target_vy = base_vy + self.adv_command[:, 1]
+            target_vz = base_vz + self.adv_command[:, 2]
+            target_yaw_rate = base_yaw_rate + self.adv_command[:, 3]
+            target_heading = wrap_PI(base_heading + self.adv_command[:, 3] * task.dt)
+        else:
+            target_vx = self.adv_command[:, 0]
+            target_vy = self.adv_command[:, 1]
+            target_vz = self.adv_command[:, 2]
+            target_yaw_rate = self.adv_command[:, 3]
+            target_heading = wrap_PI(task.target_heading + self.adv_command[:, 3] * task.dt)
 
         task.target_vx = torch.clamp(
-            self.adv_command[:, 0],
+            target_vx,
             -task.vx_limit,
             task.vx_limit,
         )
         task.target_vy = torch.clamp(
-            self.adv_command[:, 1],
+            target_vy,
             -task.vy_limit,
             task.vy_limit,
         )
         task.target_vz = torch.clamp(
-            self.adv_command[:, 2],
+            target_vz,
             -task.vz_limit,
             task.vz_limit,
         )
         task.target_yaw_rate = torch.clamp(
-            self.adv_command[:, 3],
+            target_yaw_rate,
             -task.yaw_rate_limit,
             task.yaw_rate_limit,
         )
-        task.target_heading = wrap_PI(task.target_heading + self.adv_command[:, 3] * task.dt)
+        task.target_heading = target_heading
         task.target_vn, task.target_ve = task.local_to_ground_velocity(
             task.target_vx, task.target_vy, task.target_heading
         )
@@ -376,11 +404,11 @@ class RCHumanAdversarialEnv:
         )
         self.env.reset()
         if torch.any(reset_before):
-            if bool(self.args.adv_use_random_command):
+            if self._use_random_command_base():
                 self._enable_random_command_if_needed(reset_before)
             else:
                 self._set_neutral_command(reset_before)
-        if bool(self.args.adv_use_random_command):
+        if self._use_random_command_base():
             self.env.task.sync_command(self.env)
         else:
             self._freeze_task_sync()
@@ -398,6 +426,8 @@ class RCHumanAdversarialEnv:
         self.env.step_count += 1
         if bool(self.args.adv_use_random_command):
             self.env.task.sync_command(self.env)
+        elif bool(getattr(self.args, "adv_command_random_base", False)):
+            self._apply_command_attack(cmd, update_filter=False)
         else:
             self._freeze_task_sync()
         obs = self._perturb_obs(self.env.obs())

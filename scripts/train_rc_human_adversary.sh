@@ -11,13 +11,13 @@
 # generator and attack only observation/wind.
 #
 # Run:
-#   cd /home/a/demo/NeuralPlane_stable_V2
+#   cd /home/a/demo/Hybrid_adv
 #   bash scripts/train_rc_human_adversary.sh
 # ---------------------------------------------------------------------------
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
-VICTIM_CKPT="${VICTIM_CKPT:-/home/a/demo/NeuralPlane_stable_V2/scripts/runs/2026-05-19_22-58-25_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_first2/episode_740/actor_latest.ckpt}"
-EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_cmd_obs_wind_ep740}"
+VICTIM_CKPT="${VICTIM_CKPT:-/home/a/demo/Hybrid_adv/scripts/runs/2026-05-20_23-15-17_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_first2/episode_880/actor_latest.ckpt}"
+EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_cmd_obs_wind_ep880}"
 
 "${PYTHON_BIN}" scripts/adversarial/train_rc_human_adversary.py \
     --victim-ckpt "${VICTIM_CKPT}" \

@@ -93,6 +93,9 @@ def parse_args():
     p.add_argument("--adv-wind-frac", type=float, default=0.5)
     p.add_argument("--adv-use-random-command", action="store_true", default=False,
                    help="If set, do not attack command space; use rc_human's original command generator.")
+    p.add_argument("--adv-command-random-base", action="store_true", default=False,
+                   help="When command attack is enabled, add command perturbations on top of "
+                        "rc_human's randomized command generator instead of replacing it.")
     p.add_argument("--adv-obs-default-scale", type=float, default=0.02)
     p.add_argument("--adv-obs-max-scale", type=float, default=0.10)
     p.add_argument("--adv-command-alpha", type=float, default=0.20)

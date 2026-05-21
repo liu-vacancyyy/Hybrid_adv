@@ -23,6 +23,7 @@ scenario="rc_human"
 model="HYBRID_NEW"
 algo="ppo"
 max_mode_slots="${RC_HUMAN_MAX_MODE_SLOTS:-6}"
+mode_order="${RC_HUMAN_MODE_ORDER:-config_default}"
 exp="${RC_HUMAN_EXP_NAME:-rc_human_rl_gru_wind_modes${max_mode_slots}}"
 seed=7
 device="cuda:0"
@@ -35,7 +36,7 @@ for arg in "$@"; do
     fi
 done
 
-echo "env is ${env}, scenario is ${scenario}, model is ${model}, algo is ${algo}, exp is ${exp}, seed is ${seed}, max_mode_slots is ${max_mode_slots}"
+echo "env is ${env}, scenario is ${scenario}, model is ${model}, algo is ${algo}, exp is ${exp}, seed is ${seed}, max_mode_slots is ${max_mode_slots}, mode_order is ${mode_order}"
 "${PYTHON_BIN}" scripts/train/train_F16sim.py \
     --env-name ${env} --algorithm-name ${algo} --scenario-name ${scenario} --model-name ${model} --experiment-name ${exp} \
     --seed ${seed} --device ${device} --n-training-threads 1 --n-rollout-threads 1024 --cuda \

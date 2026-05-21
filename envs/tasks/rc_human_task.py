@@ -13,6 +13,7 @@ from hybrid_termination_conditions.extreme_angle import ExtremeAngle
 from hybrid_termination_conditions.extreme_omega import ExtremeOmega
 from hybrid_termination_conditions.overload import Overload
 from hybrid_termination_conditions.high_speed import HighSpeed
+from hybrid_termination_conditions.rc_human_tracking_error import RCHumanTrackingError
 from termination_conditions.hover_timeout_done import HoverTimeoutDone
 from utils.utils import wrap_PI
 
@@ -89,7 +90,8 @@ class RCHumanTask(BaseTask):
         self.episode_count = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.operation_mode = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.curriculum_level = torch.zeros(self.n, dtype=torch.long, device=self.device)
-        self.mode_order = torch.tensor([0, 1, 2, 5, 3, 4], dtype=torch.long, device=self.device)
+        mode_order = self._parse_mode_order(config)
+        self.mode_order = torch.tensor(mode_order, dtype=torch.long, device=self.device)
         mode_slots = int(os.environ.get(
             'RC_HUMAN_MAX_MODE_SLOTS',
             getattr(config, 'rc_human_max_mode_slots', int(self.mode_order.numel())),
@@ -112,8 +114,27 @@ class RCHumanTask(BaseTask):
             HighSpeed(self.config),
             ExtremeAngle(self.config),
             ExtremeOmega(self.config),
+            RCHumanTrackingError(self.config),
             HoverTimeoutDone(self.config),
         ]
+
+    def _parse_mode_order(self, config):
+        raw = os.environ.get(
+            'RC_HUMAN_MODE_ORDER',
+            getattr(config, 'rc_human_mode_order', '0 1 2 5 3 4'),
+        )
+        if isinstance(raw, (list, tuple)):
+            values = [int(x) for x in raw]
+        else:
+            values = [int(x) for x in str(raw).replace(',', ' ').split()]
+        if not values:
+            raise ValueError('RC_HUMAN_MODE_ORDER must contain at least one mode id')
+        invalid = [x for x in values if x < 0 or x > 5]
+        if invalid:
+            raise ValueError(f'Invalid rc_human mode ids: {invalid}')
+        if len(set(values)) != len(values):
+            raise ValueError(f'RC_HUMAN_MODE_ORDER contains duplicates: {values}')
+        return values
 
     def reset(self, env):
         reset = (env.is_done.bool() | env.bad_done.bool()) | env.exceed_time_limit.bool()

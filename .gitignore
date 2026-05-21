@@ -28,22 +28,10 @@ venv/
 env/
 ENV/
 
-# Training outputs, checkpoints, logs
-runs/
-scripts/runs/
-algorithms/**/runs/
-algorithms/**/runs_*/
-algorithms/**/checkpoints/
-algorithms/**/checkpoints_*/
+# Training logs and non-weight outputs
 wandb/
 logs/
 *.log
-*.ckpt
-actor_*.pt
-critic_*.pt
-adv_actor_*.pt
-adv_critic_*.pt
-dagger_latest.pt
 *.onnx
 events.out.tfevents*
 
