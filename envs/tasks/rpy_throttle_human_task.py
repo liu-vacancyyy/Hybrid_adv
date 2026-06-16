@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from tasks.rc_human_task import RCHumanTask
 from reward_functions.rpy_throttle_reward import (
     RPYThrottleEventDrivenReward,
-    RPYThrottleReward,
+    make_rpy_throttle_reward,
 )
 from hybrid_termination_conditions.low_altitude import LowAltitude
 from hybrid_termination_conditions.extreme_angle import ExtremeAngle
@@ -138,7 +138,7 @@ class RPYThrottleHumanTask(RCHumanTask):
         self.episode_metric_skipped_count = torch.zeros(self.n, device=self.device)
 
         self.reward_functions = [
-            RPYThrottleReward(self.config),
+            make_rpy_throttle_reward(self.config),
             RPYThrottleEventDrivenReward(self.config),
         ]
         self.termination_conditions = [

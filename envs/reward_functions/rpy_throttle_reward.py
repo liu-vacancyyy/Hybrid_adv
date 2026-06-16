@@ -9,29 +9,158 @@ from reward_function_base import BaseRewardFunction
 from utils.utils import wrap_PI
 
 
+RPY_THROTTLE_REWARD_PRESETS = {
+    # Current default.  Keep this close to the first no-forward run so old
+    # configs remain comparable.
+    'balanced': {
+        'w_alive': 0.2,
+        'w_attitude': 5.0,
+        'w_yaw_rate': 2.0,
+        'w_throttle': 2.0,
+        'w_omega': 1.0,
+        'w_smooth': 0.4,
+        'w_velocity': 0.0,
+        'w_overshoot': 1.0,
+        'w_moving_away': 0.3,
+        'sig_roll': 0.045,
+        'sig_pitch': 0.045,
+        'sig_yaw_rate': 0.12,
+        'sig_throttle': 0.06,
+        'sig_omega': 0.8,
+        'sig_smooth': 0.8,
+        'sig_velocity': 2.5,
+        'sig_overshoot': 0.35,
+    },
+    # Faster tracking pressure.  Use this to check whether the policy is
+    # under-incentivized on the commanded attitude/yaw/throttle targets.
+    'track_strict': {
+        'w_alive': 0.2,
+        'w_attitude': 7.0,
+        'w_yaw_rate': 2.8,
+        'w_throttle': 2.8,
+        'w_omega': 0.6,
+        'w_smooth': 0.2,
+        'w_velocity': 0.0,
+        'w_overshoot': 0.7,
+        'w_moving_away': 0.2,
+        'sig_roll': 0.038,
+        'sig_pitch': 0.038,
+        'sig_yaw_rate': 0.10,
+        'sig_throttle': 0.05,
+        'sig_omega': 0.9,
+        'sig_smooth': 0.9,
+        'sig_velocity': 2.5,
+        'sig_overshoot': 0.30,
+    },
+    # Heavier damping and anti-overshoot pressure.  This is usually the safer
+    # no-forward variant when attitude targets are reached but ring or overshoot.
+    'damped': {
+        'w_alive': 0.2,
+        'w_attitude': 5.0,
+        'w_yaw_rate': 2.0,
+        'w_throttle': 2.0,
+        'w_omega': 1.6,
+        'w_smooth': 0.8,
+        'w_velocity': 0.0,
+        'w_overshoot': 2.2,
+        'w_moving_away': 0.8,
+        'sig_roll': 0.050,
+        'sig_pitch': 0.050,
+        'sig_yaw_rate': 0.13,
+        'sig_throttle': 0.07,
+        'sig_omega': 0.65,
+        'sig_smooth': 0.55,
+        'sig_velocity': 2.5,
+        'sig_overshoot': 0.22,
+    },
+    # No-forward motor layout has less authority margin in combined commands.
+    # This version makes collective tracking more explicit while still
+    # penalizing overshoot.
+    'throttle_focus': {
+        'w_alive': 0.2,
+        'w_attitude': 4.5,
+        'w_yaw_rate': 1.8,
+        'w_throttle': 3.8,
+        'w_omega': 1.2,
+        'w_smooth': 0.6,
+        'w_velocity': 0.0,
+        'w_overshoot': 1.5,
+        'w_moving_away': 0.5,
+        'sig_roll': 0.045,
+        'sig_pitch': 0.045,
+        'sig_yaw_rate': 0.12,
+        'sig_throttle': 0.045,
+        'sig_omega': 0.75,
+        'sig_smooth': 0.7,
+        'sig_velocity': 2.5,
+        'sig_overshoot': 0.28,
+    },
+}
+
+RPY_THROTTLE_REWARD_ALIASES = {
+    'default': 'balanced',
+    'base': 'balanced',
+    'normal': 'balanced',
+    'strict': 'track_strict',
+    'tracking': 'track_strict',
+    'track': 'track_strict',
+    'anti_overshoot': 'damped',
+    'damping': 'damped',
+    'smooth': 'damped',
+    'throttle': 'throttle_focus',
+    'collective': 'throttle_focus',
+}
+
+
+def _normalize_reward_variant(name):
+    normalized = str(name).strip().lower().replace('-', '_')
+    normalized = RPY_THROTTLE_REWARD_ALIASES.get(normalized, normalized)
+    if normalized not in RPY_THROTTLE_REWARD_PRESETS:
+        valid = ', '.join(sorted(RPY_THROTTLE_REWARD_PRESETS))
+        raise ValueError(
+            f'Unknown RPY_THROTTLE_REWARD_VARIANT={name!r}; valid variants: {valid}'
+        )
+    return normalized
+
+
 class RPYThrottleReward(BaseRewardFunction):
     """Dense reward for roll/pitch/yaw-rate/collective-throttle tracking."""
 
+    preset_name = 'balanced'
+    allow_generic_config_override = True
+
     def __init__(self, config):
         super().__init__(config)
-        self.w_alive = float(getattr(config, 'rpy_throttle_w_alive', 0.2))
-        self.w_attitude = float(getattr(config, 'rpy_throttle_w_attitude', 5.0))
-        self.w_yaw_rate = float(getattr(config, 'rpy_throttle_w_yaw_rate', 2.0))
-        self.w_throttle = float(getattr(config, 'rpy_throttle_w_throttle', 2.0))
-        self.w_omega = float(getattr(config, 'rpy_throttle_w_omega', 1.0))
-        self.w_smooth = float(getattr(config, 'rpy_throttle_w_smooth', 0.4))
-        self.w_velocity = float(getattr(config, 'rpy_throttle_w_velocity', 0.4))
-        self.w_overshoot = float(getattr(config, 'rpy_throttle_w_overshoot', 1.0))
-        self.w_moving_away = float(getattr(config, 'rpy_throttle_w_moving_away', 0.3))
+        self.reward_variant = _normalize_reward_variant(self.preset_name)
+        preset = RPY_THROTTLE_REWARD_PRESETS[self.reward_variant]
 
-        self.sig_roll = float(getattr(config, 'rpy_throttle_sig_roll', 0.045))
-        self.sig_pitch = float(getattr(config, 'rpy_throttle_sig_pitch', 0.045))
-        self.sig_yaw_rate = float(getattr(config, 'rpy_throttle_sig_yaw_rate', 0.12))
-        self.sig_throttle = float(getattr(config, 'rpy_throttle_sig_throttle', 0.06))
-        self.sig_omega = float(getattr(config, 'rpy_throttle_sig_omega', 0.8))
-        self.sig_smooth = float(getattr(config, 'rpy_throttle_sig_smooth', 0.8))
-        self.sig_velocity = float(getattr(config, 'rpy_throttle_sig_velocity', 2.5))
-        self.sig_overshoot = float(getattr(config, 'rpy_throttle_sig_overshoot', 0.35))
+        self.w_alive = self._float_param(config, 'w_alive', preset)
+        self.w_attitude = self._float_param(config, 'w_attitude', preset)
+        self.w_yaw_rate = self._float_param(config, 'w_yaw_rate', preset)
+        self.w_throttle = self._float_param(config, 'w_throttle', preset)
+        self.w_omega = self._float_param(config, 'w_omega', preset)
+        self.w_smooth = self._float_param(config, 'w_smooth', preset)
+        self.w_velocity = self._float_param(config, 'w_velocity', preset)
+        self.w_overshoot = self._float_param(config, 'w_overshoot', preset)
+        self.w_moving_away = self._float_param(config, 'w_moving_away', preset)
+
+        self.sig_roll = self._float_param(config, 'sig_roll', preset)
+        self.sig_pitch = self._float_param(config, 'sig_pitch', preset)
+        self.sig_yaw_rate = self._float_param(config, 'sig_yaw_rate', preset)
+        self.sig_throttle = self._float_param(config, 'sig_throttle', preset)
+        self.sig_omega = self._float_param(config, 'sig_omega', preset)
+        self.sig_smooth = self._float_param(config, 'sig_smooth', preset)
+        self.sig_velocity = self._float_param(config, 'sig_velocity', preset)
+        self.sig_overshoot = self._float_param(config, 'sig_overshoot', preset)
+
+    def _float_param(self, config, name, preset):
+        variant_key = f'rpy_throttle_{self.reward_variant}_{name}'
+        generic_key = f'rpy_throttle_{name}'
+        if hasattr(config, variant_key):
+            return float(getattr(config, variant_key))
+        if self.allow_generic_config_override and hasattr(config, generic_key):
+            return float(getattr(config, generic_key))
+        return float(preset[name])
 
     def get_reward(self, task, env):
         task.sync_command(env)
@@ -104,6 +233,35 @@ class RPYThrottleReward(BaseRewardFunction):
             reward = reward + self.w_smooth * r_smooth
 
         return reward
+
+
+class RPYThrottleTrackStrictReward(RPYThrottleReward):
+    preset_name = 'track_strict'
+    allow_generic_config_override = False
+
+
+class RPYThrottleDampedReward(RPYThrottleReward):
+    preset_name = 'damped'
+    allow_generic_config_override = False
+
+
+class RPYThrottleThrottleFocusReward(RPYThrottleReward):
+    preset_name = 'throttle_focus'
+    allow_generic_config_override = False
+
+
+def make_rpy_throttle_reward(config):
+    variant = _normalize_reward_variant(os.environ.get(
+        'RPY_THROTTLE_REWARD_VARIANT',
+        getattr(config, 'rpy_throttle_reward_variant', 'balanced'),
+    ))
+    reward_classes = {
+        'balanced': RPYThrottleReward,
+        'track_strict': RPYThrottleTrackStrictReward,
+        'damped': RPYThrottleDampedReward,
+        'throttle_focus': RPYThrottleThrottleFocusReward,
+    }
+    return reward_classes[variant](config)
 
 
 class RPYThrottleEventDrivenReward(BaseRewardFunction):

@@ -31,9 +31,11 @@ ALGO_NAME="ppo"
 export RPY_THROTTLE_MODE_ORDER="${RPY_THROTTLE_MODE_ORDER:-0 1 2 3 4 5}"
 export RPY_THROTTLE_MAX_MODE_SLOTS="${RPY_THROTTLE_MAX_MODE_SLOTS:-6}"
 export RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC="${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC:-0.05}"
+export RPY_THROTTLE_REWARD_VARIANT="${RPY_THROTTLE_REWARD_VARIANT:-balanced}"
 
 RATE_TAG=$(printf '%s' "${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC}" | tr -c '0-9A-Za-z' '_')
-EXP="${RPY_THROTTLE_EXP_NAME:-rpy_throttle_human_no_forward_nowind_rate${RATE_TAG}_from_scratch_modes012345}"
+REWARD_TAG=$(printf '%s' "${RPY_THROTTLE_REWARD_VARIANT}" | tr -c '0-9A-Za-z' '_')
+EXP="${RPY_THROTTLE_EXP_NAME:-rpy_throttle_human_no_forward_nowind_${REWARD_TAG}_rate${RATE_TAG}_from_scratch_modes012345}"
 
 N_ROLLOUT_THREADS="${N_ROLLOUT_THREADS:-2048}"
 BUFFER_SIZE="${BUFFER_SIZE:-1500}"
@@ -124,6 +126,7 @@ echo "  experiment: ${EXP}"
 echo "  env/model: ${ENV_NAME}/${SCENARIO_NAME}/${MODEL_NAME}"
 echo "  motor0: forced to 0N by model and --freeze-head-motor"
 echo "  seed/device: ${SEED}/${DEVICE}"
+echo "  reward_variant: ${RPY_THROTTLE_REWARD_VARIANT}"
 echo "  mode_order: ${RPY_THROTTLE_MODE_ORDER}"
 echo "  max_mode_slots: ${RPY_THROTTLE_MAX_MODE_SLOTS}"
 echo "  command_rate_limit_frac: ${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC}"

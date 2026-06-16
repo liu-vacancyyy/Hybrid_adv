@@ -142,6 +142,12 @@ rc_human_alt_high: 95.0
 rc_human_alt_low: 5.0
 
 # reward shaping
+# Available rpy_throttle_reward_variant values:
+#   balanced       current baseline; balanced tracking/damping/smoothness
+#   track_strict   stronger tracking, weaker damping; use to test tracking ceiling
+#   damped         stronger anti-overshoot/smooth/omega penalties
+#   throttle_focus stronger collective-throttle tracking for no-forward layout
+rpy_throttle_reward_variant: balanced
 rpy_throttle_w_alive: 0.2
 rpy_throttle_w_attitude: 5.0
 rpy_throttle_w_yaw_rate: 2.0
