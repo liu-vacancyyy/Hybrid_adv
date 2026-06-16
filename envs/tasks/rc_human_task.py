@@ -19,15 +19,16 @@ from utils.utils import wrap_PI
 
 
 class RCHumanTask(BaseTask):
-    """Human-like RC task with PX4-style stick processing.
+    """Human-like RC task with PX4 VTOL-MC stick processing.
 
     The command source is synthetic stick data. Raw sticks are sampled as
-    piecewise-constant human inputs, then passed through deadzone, expo,
-    slew-rate limiting and low-pass filtering before becoming velocity and yaw
-    commands. Like PX4 ManualPosition, horizontal sticks are first interpreted
-    in the heading frame, then rotated into the local N/E velocity setpoint used
-    by the controller. LearningToFly limits are kept for the stick-scaled
-    velocity magnitudes.
+    piecewise-constant human inputs, then passed through PX4's deadzone/expo
+    mapping. Velocity sticks map directly to velocity setpoints, while yaw uses
+    PX4's manual yaw-rate first-order filter. VTOL in MC mode uses the same
+    multicopter manual task path; for this velocity-tracking task we mirror the
+    ManualPosition direct-velocity mapping: horizontal sticks are expo-shaped,
+    limited to the unit circle, scaled by forward/back/side velocity limits,
+    and rotated from the heading frame into the local N/E velocity setpoint.
     """
 
     def __init__(self, config, n, device, random_seed):
@@ -35,20 +36,31 @@ class RCHumanTask(BaseTask):
         self.task_name = 'rc_human'
 
         self.dt = float(getattr(config, 'dt', 0.02))
-        self.vx_limit = float(getattr(config, 'rc_human_vx_limit', 1.0))
+        legacy_vx_limit = float(getattr(config, 'rc_human_vx_limit', 1.0))
+        self.vx_min = float(getattr(config, 'rc_human_vx_min', -legacy_vx_limit))
+        self.vx_max = float(getattr(config, 'rc_human_vx_max', legacy_vx_limit))
+        self.vx_limit = max(abs(self.vx_min), abs(self.vx_max), 1e-6)
         self.vy_limit = float(getattr(config, 'rc_human_vy_limit', 1.0))
         self.vz_limit = float(getattr(config, 'rc_human_vz_limit', 1.0))
         self.yaw_rate_limit = float(getattr(config, 'rc_human_yaw_rate_limit', 0.6))
 
         self.deadzone = float(getattr(config, 'rc_human_deadzone', 0.10))
         self.expo = float(getattr(config, 'rc_human_expo', 0.60))
-        self.velocity_tau = float(getattr(config, 'rc_human_velocity_tau', 0.55))
-        self.yaw_tau = float(getattr(config, 'rc_human_yaw_tau', 0.75))
-        self.stick_slew_rate = float(getattr(config, 'rc_human_stick_slew_rate', 2.0))
+        self.velocity_tau = float(getattr(config, 'rc_human_velocity_tau', 0.0))
+        self.yaw_tau = float(getattr(config, 'rc_human_yaw_tau', 0.08))
         self.stick_noise_std = float(getattr(config, 'rc_human_stick_noise_std', 0.015))
         self.dwell_min = int(getattr(config, 'rc_human_dwell_min_steps', 75))
         self.dwell_max = int(getattr(config, 'rc_human_dwell_max_steps', 300))
         self.curriculum_enable = bool(getattr(config, 'rc_human_curriculum_enable', True))
+        self.vx_forward_curriculum_enable = bool(
+            getattr(config, 'rc_human_vx_forward_curriculum_enable', True)
+        )
+        self.vx_forward_easy_max = float(
+            getattr(config, 'rc_human_vx_forward_easy_max', min(self.vx_max, 1.0))
+        )
+        self.vx_forward_medium_max = float(
+            getattr(config, 'rc_human_vx_forward_medium_max', min(self.vx_max, 3.0))
+        )
         self.levels_per_mode = int(getattr(config, 'rc_human_levels_per_mode', 20))
         self.mix_current = float(getattr(config, 'rc_human_mix_current', 0.50))
         self.mix_easy = float(getattr(config, 'rc_human_mix_easy_replay', 0.20))
@@ -57,6 +69,55 @@ class RCHumanTask(BaseTask):
         self.easy_stick = float(getattr(config, 'rc_human_easy_stick', 0.25))
         self.medium_stick = float(getattr(config, 'rc_human_medium_stick', 0.65))
         self.hard_stick = float(getattr(config, 'rc_human_hard_stick', 1.0))
+        self.command_transient_grace_steps = int(
+            getattr(config, 'rc_human_command_transient_grace_steps', 60)
+        )
+        self.command_transient_threshold = float(
+            getattr(config, 'rc_human_command_transient_threshold', 0.20)
+        )
+        self.mode3_reverse_axes = max(
+            1, min(4, int(getattr(config, 'rc_human_mode3_reverse_axes', 1)))
+        )
+        self.large_command_transient_grace_steps = int(
+            getattr(
+                config,
+                'rc_human_large_command_transient_grace_steps',
+                getattr(config, 'rc_human_reversal_transient_grace_steps',
+                        self.command_transient_grace_steps),
+            )
+        )
+        self.large_command_transient_delta = float(
+            getattr(config, 'rc_human_large_command_transient_delta', 1.0)
+        )
+        self.command_reversal_threshold = float(
+            getattr(
+                config,
+                'rc_human_command_reversal_threshold',
+                0.1,
+            )
+        )
+        self.command_rate_limit_frac = max(0.0, float(os.environ.get(
+            'RC_HUMAN_COMMAND_RATE_LIMIT_FRAC',
+            getattr(config, 'rc_human_command_rate_limit_frac', 0.0),
+        )))
+        self.success_ignore_transient = bool(
+            getattr(config, 'rc_human_success_ignore_transient', True)
+        )
+        self.mode5_hold_min_steps = int(
+            getattr(config, 'rc_human_mode5_hold_min_steps', 75)
+        )
+        self.mode5_hold_max_steps = int(
+            getattr(config, 'rc_human_mode5_hold_max_steps', 250)
+        )
+        self.mode5_release_recovery_steps = int(
+            getattr(config, 'rc_human_mode5_release_recovery_steps', 150)
+        )
+        self.mode5_release_speed_error = float(
+            getattr(config, 'rc_human_mode5_release_speed_error', 0.35)
+        )
+        self.mode5_release_target_frac = float(
+            getattr(config, 'rc_human_mode5_release_target_frac', 0.80)
+        )
         self.success_vel_error = float(getattr(config, 'rc_human_success_vel_error', 0.35))
         self.success_yaw_error = float(getattr(config, 'rc_human_success_yaw_error', 0.18))
         self.success_attitude_error = float(getattr(config, 'rc_human_success_attitude_error', 0.22))
@@ -81,11 +142,25 @@ class RCHumanTask(BaseTask):
         self.raw_vy = torch.zeros(self.n, device=self.device)
         self.raw_vz = torch.zeros(self.n, device=self.device)
         self.raw_yaw = torch.zeros(self.n, device=self.device)
+        self.desired_raw_vx = torch.zeros(self.n, device=self.device)
+        self.desired_raw_vy = torch.zeros(self.n, device=self.device)
+        self.desired_raw_vz = torch.zeros(self.n, device=self.device)
+        self.desired_raw_yaw = torch.zeros(self.n, device=self.device)
         self.stick_vx = torch.zeros(self.n, device=self.device)
         self.stick_vy = torch.zeros(self.n, device=self.device)
         self.stick_vz = torch.zeros(self.n, device=self.device)
         self.stick_yaw = torch.zeros(self.n, device=self.device)
+        self.command_rate_limited = torch.zeros(self.n, dtype=torch.bool, device=self.device)
+        self.command_raw_delta = torch.zeros(self.n, device=self.device)
+        self.vx_forward_limit = torch.full(
+            (self.n,), self.vx_forward_easy_max, device=self.device
+        )
         self.dwell_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
+        self.command_transient_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
+        self.mode5_release_state = torch.zeros(self.n, dtype=torch.long, device=self.device)
+        self.mode5_hold_elapsed = torch.zeros(self.n, dtype=torch.long, device=self.device)
+        self.mode5_recovery_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
+        self.mode5_pre_release_raw = torch.zeros(self.n, device=self.device)
         self.last_synced_step = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.episode_count = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.operation_mode = torch.zeros(self.n, dtype=torch.long, device=self.device)
@@ -103,6 +178,7 @@ class RCHumanTask(BaseTask):
         self.episode_yaw_error_sum = torch.zeros(self.n, device=self.device)
         self.episode_attitude_error_sum = torch.zeros(self.n, device=self.device)
         self.episode_metric_count = torch.zeros(self.n, device=self.device)
+        self.episode_metric_skipped_count = torch.zeros(self.n, device=self.device)
 
         self.reward_functions = [
             RCHumanReward(self.config),
@@ -148,29 +224,43 @@ class RCHumanTask(BaseTask):
         _roll, _pitch, heading = env.model.get_posture()
         local_vx, local_vy = self.ground_to_local_velocity(vx_n, vy_e, heading)
 
-        self.target_vx[reset] = torch.clamp(local_vx[reset], -self.vx_limit, self.vx_limit)
+        self.target_vx[reset] = torch.clamp(local_vx[reset], self.vx_min, self.vx_max)
         self.target_vy[reset] = torch.clamp(local_vy[reset], -self.vy_limit, self.vy_limit)
-        self.target_vn[reset] = vx_n[reset]
-        self.target_ve[reset] = vy_e[reset]
         self.target_vz[reset] = torch.clamp(vz[reset], -self.vz_limit, self.vz_limit)
         self.target_heading[reset] = heading[reset]
         self.target_yaw_rate[reset] = 0.0
+        self.target_vn[reset], self.target_ve[reset] = self.local_to_ground_velocity(
+            self.target_vx[reset], self.target_vy[reset], self.target_heading[reset]
+        )
 
         self.raw_vx[reset] = 0.0
         self.raw_vy[reset] = 0.0
         self.raw_vz[reset] = 0.0
         self.raw_yaw[reset] = 0.0
+        self.desired_raw_vx[reset] = 0.0
+        self.desired_raw_vy[reset] = 0.0
+        self.desired_raw_vz[reset] = 0.0
+        self.desired_raw_yaw[reset] = 0.0
         self.stick_vx[reset] = 0.0
         self.stick_vy[reset] = 0.0
         self.stick_vz[reset] = 0.0
         self.stick_yaw[reset] = 0.0
+        self.command_rate_limited[reset] = False
+        self.command_raw_delta[reset] = 0.0
+        self.vx_forward_limit[reset] = self.vx_forward_easy_max
         self.dwell_left[reset] = 0
+        self.command_transient_left[reset] = 0
+        self.mode5_release_state[reset] = 0
+        self.mode5_hold_elapsed[reset] = 0
+        self.mode5_recovery_left[reset] = 0
+        self.mode5_pre_release_raw[reset] = 0.0
         self.last_synced_step[reset] = 0
         self.episode_count[reset] += 1
         self.episode_error_sum[reset] = 0.0
         self.episode_yaw_error_sum[reset] = 0.0
         self.episode_attitude_error_sum[reset] = 0.0
         self.episode_metric_count[reset] = 0.0
+        self.episode_metric_skipped_count[reset] = 0.0
 
     def step(self, env):
         self.sync_command(env)
@@ -215,8 +305,8 @@ class RCHumanTask(BaseTask):
         hover = mode == 0
         values[hover, :] = 0.0
 
-        # 1 small correction: all axes move gently in a small range.
-        # 2 step push: one or two axes jump to a high value.
+        # 1 continuous correction: all axes move together, from small to hard.
+        # 2 step push: one axis jumps to a high value.
         step = mode == 2
         if torch.any(step):
             axis = torch.randint(0, 4, (int(step.sum().item()),), device=d)
@@ -233,11 +323,28 @@ class RCHumanTask(BaseTask):
                 self.raw_yaw[idx[reverse]],
             ), dim=1)
             fallback = signs[reverse] * amp[reverse].reshape(-1, 1)
-            values[reverse, :] = torch.where(
+            reversed_values = torch.where(
                 torch.abs(current) > 0.1,
                 -torch.sign(current) * amp[reverse].reshape(-1, 1),
                 fallback,
             )
+            if self.mode3_reverse_axes >= 4:
+                values[reverse, :] = reversed_values
+            else:
+                count = int(reverse.sum().item())
+                scores = torch.where(
+                    torch.abs(current) > 0.1,
+                    torch.abs(current),
+                    torch.rand(count, 4, device=d) * 1e-3,
+                )
+                selected = torch.topk(
+                    scores,
+                    k=self.mode3_reverse_axes,
+                    dim=1,
+                ).indices
+                limited = torch.zeros_like(reversed_values)
+                limited.scatter_(1, selected, reversed_values.gather(1, selected))
+                values[reverse, :] = limited
 
         # 4 combined input: several axes move together.
         combined = mode == 4
@@ -246,18 +353,80 @@ class RCHumanTask(BaseTask):
                 0.35 + 0.65 * torch.rand(int(combined.sum().item()), 4, device=d)
             ) * amp[combined].reshape(-1, 1) * signs[combined]
 
-        # 5 release: force the raw input back to center from wherever it was.
+        prev_raw = torch.stack((
+            self.desired_raw_vx[idx],
+            self.desired_raw_vy[idx],
+            self.desired_raw_vz[idx],
+            self.desired_raw_yaw[idx],
+        ), dim=1)
+
+        # 5 release: hold a level-dependent forward stick until the aircraft is
+        # near the requested speed or a timeout is reached.  The actual release
+        # to centered sticks is handled by _update_mode5_release_state().
         release = mode == 5
-        values[release, :] = 0.0
+        if torch.any(release):
+            release_idx = idx[release]
+            pre_release = amp[release]
+            self.mode5_release_state[release_idx] = 1
+            self.mode5_hold_elapsed[release_idx] = 0
+            self.mode5_recovery_left[release_idx] = 0
+            self.mode5_pre_release_raw[release_idx] = pre_release
+            self.stick_vy[release_idx] = 0.0
+            self.stick_vz[release_idx] = 0.0
+            self.stick_yaw[release_idx] = 0.0
+            values[release, :] = 0.0
+            values[release, 0] = pre_release
 
         self.operation_mode[mask] = mode
-        self.raw_vx[mask] = torch.clamp(values[:, 0], -1.0, 1.0)
-        self.raw_vy[mask] = torch.clamp(values[:, 1], -1.0, 1.0)
-        self.raw_vz[mask] = torch.clamp(values[:, 2], -1.0, 1.0)
-        self.raw_yaw[mask] = torch.clamp(values[:, 3], -1.0, 1.0)
-        self.dwell_left[mask] = torch.randint(
+        non_release = ~release
+        if torch.any(non_release):
+            non_release_idx = idx[non_release]
+            self.mode5_release_state[non_release_idx] = 0
+            self.mode5_hold_elapsed[non_release_idx] = 0
+            self.mode5_recovery_left[non_release_idx] = 0
+            self.mode5_pre_release_raw[non_release_idx] = 0.0
+
+        delta_raw = torch.max(torch.abs(values - prev_raw), dim=1).values
+        reversal = (
+            (torch.abs(prev_raw) > self.command_reversal_threshold)
+            & (torch.abs(values) > self.command_reversal_threshold)
+            & (prev_raw * values < 0.0)
+        )
+        large_transient = (
+            (delta_raw >= self.large_command_transient_delta)
+            | torch.any(reversal, dim=1)
+        )
+        changed = delta_raw > self.command_transient_threshold
+        if torch.any(changed):
+            grace_steps = torch.full(
+                (size,),
+                max(self.command_transient_grace_steps, 0),
+                dtype=torch.long,
+                device=d,
+            )
+            grace_steps[large_transient] = max(
+                self.large_command_transient_grace_steps,
+                self.command_transient_grace_steps,
+                0,
+            )
+            self.command_transient_left[idx[changed]] = grace_steps[changed]
+
+        self.desired_raw_vx[mask] = torch.clamp(values[:, 0], -1.0, 1.0)
+        self.desired_raw_vy[mask] = torch.clamp(values[:, 1], -1.0, 1.0)
+        self.desired_raw_vz[mask] = torch.clamp(values[:, 2], -1.0, 1.0)
+        self.desired_raw_yaw[mask] = torch.clamp(values[:, 3], -1.0, 1.0)
+        self.vx_forward_limit[mask] = self._curriculum_vx_forward_limit(
+            sampled_level, mode
+        )
+        dwell = torch.randint(
             self.dwell_min, self.dwell_max + 1, (size,), device=d, dtype=torch.long
         )
+        if torch.any(release):
+            dwell[release] = max(
+                self.mode5_hold_max_steps + self.mode5_release_recovery_steps,
+                1,
+            )
+        self.dwell_left[mask] = dwell
 
     def _update_curriculum_from_last_episode(self, env, reset):
         if not self.curriculum_enable:
@@ -303,6 +472,13 @@ class RCHumanTask(BaseTask):
         high = int(max(low, min(high, self.max_curriculum_level)))
         return torch.randint(low, high + 1, shape, device=self.device, dtype=torch.long)
 
+    def _randint_level_between(self, low, high):
+        low = torch.clamp(low.long(), 0, self.max_curriculum_level)
+        high = torch.clamp(high.long(), 0, self.max_curriculum_level)
+        high = torch.maximum(high, low)
+        span = (high - low + 1).float()
+        return low + torch.floor(torch.rand_like(span) * span).long()
+
     def _sample_command_level(self, idx):
         if not self.curriculum_enable:
             return torch.full((idx.numel(),), self.max_curriculum_level,
@@ -325,22 +501,49 @@ class RCHumanTask(BaseTask):
         medium_max = max(medium_min, int(round(self.max_curriculum_level * 0.66)))
 
         if torch.any(easy_mask):
-            sampled[easy_mask] = self._randint_level(0, easy_max,
-                                                     (int(easy_mask.sum().item()),))
+            high = torch.minimum(
+                current[easy_mask],
+                torch.full_like(current[easy_mask], easy_max),
+            )
+            sampled[easy_mask] = self._randint_level_between(
+                torch.zeros_like(high), high
+            )
         if torch.any(medium_mask):
-            sampled[medium_mask] = self._randint_level(medium_min, medium_max,
-                                                       (int(medium_mask.sum().item()),))
+            current_medium = current[medium_mask]
+            can_sample_medium = current_medium >= medium_min
+            low = torch.where(
+                can_sample_medium,
+                torch.full_like(current_medium, medium_min),
+                torch.zeros_like(current_medium),
+            )
+            high = torch.where(
+                can_sample_medium,
+                torch.minimum(
+                    current_medium,
+                    torch.full_like(current_medium, medium_max),
+                ),
+                current_medium,
+            )
+            sampled[medium_mask] = self._randint_level_between(low, high)
         if torch.any(random_mask):
-            sampled[random_mask] = self._randint_level(0, self.max_curriculum_level,
-                                                       (int(random_mask.sum().item()),))
+            high = current[random_mask]
+            sampled[random_mask] = self._randint_level_between(
+                torch.zeros_like(high), high
+            )
 
         return sampled
 
     def update_episode_metrics(self, vel_error, yaw_error, attitude_error):
-        self.episode_error_sum += vel_error.detach()
-        self.episode_yaw_error_sum += torch.abs(yaw_error.detach())
-        self.episode_attitude_error_sum += attitude_error.detach()
-        self.episode_metric_count += 1.0
+        valid = torch.ones_like(vel_error, dtype=torch.bool, device=self.device)
+        if self.success_ignore_transient:
+            valid = valid & (self.command_transient_left <= 0)
+
+        valid_f = valid.detach().float()
+        self.episode_error_sum += vel_error.detach() * valid_f
+        self.episode_yaw_error_sum += torch.abs(yaw_error.detach()) * valid_f
+        self.episode_attitude_error_sum += attitude_error.detach() * valid_f
+        self.episode_metric_count += valid_f
+        self.episode_metric_skipped_count += (~valid).detach().float()
 
     def get_training_metrics(self):
         count = torch.clamp(self.episode_metric_count, min=1.0)
@@ -353,14 +556,34 @@ class RCHumanTask(BaseTask):
             'rc_human/curriculum_level_max': self.curriculum_level.float().max(),
             'rc_human/curriculum_level_limit': torch.tensor(
                 float(self.max_curriculum_level), device=self.device),
+            'rc_human/vx_forward_limit_mean': self.vx_forward_limit.mean(),
+            'rc_human/vx_forward_limit_max': self.vx_forward_limit.max(),
             'rc_human/tracking_error_mean': mean_vel_error.mean(),
             'rc_human/tracking_vel_error_mean': mean_vel_error.mean(),
             'rc_human/tracking_yaw_error_mean': mean_yaw_error.mean(),
             'rc_human/tracking_attitude_error_mean': mean_attitude_error.mean(),
         }
-        for mode_id in range(int(self.mode_order.numel())):
+        metric_total = self.episode_metric_count + self.episode_metric_skipped_count
+        metrics['rc_human/success_metric_valid_fraction'] = (
+            self.episode_metric_count / torch.clamp(metric_total, min=1.0)
+        ).mean()
+        metrics['rc_human/success_metric_skipped_fraction'] = (
+            self.episode_metric_skipped_count / torch.clamp(metric_total, min=1.0)
+        ).mean()
+        for mode_id in range(6):
             metrics[f'rc_human/mode_{mode_id}_fraction'] = (
                 self.operation_mode == mode_id).float().mean()
+        metrics['rc_human/command_transient_fraction'] = (
+            self.command_transient_left > 0).float().mean()
+        metrics['rc_human/command_rate_limit_frac'] = torch.tensor(
+            float(self.command_rate_limit_frac), device=self.device)
+        metrics['rc_human/command_rate_limited_fraction'] = (
+            self.command_rate_limited.float().mean())
+        metrics['rc_human/command_raw_delta_mean'] = self.command_raw_delta.mean()
+        metrics['rc_human/mode5_hold_fraction'] = (
+            self.mode5_release_state == 1).float().mean()
+        metrics['rc_human/mode5_released_fraction'] = (
+            self.mode5_release_state == 2).float().mean()
         return metrics
 
     def _curriculum_mode(self, idx):
@@ -381,18 +604,38 @@ class RCHumanTask(BaseTask):
         progress = sublevel / denom
 
         amp = self.easy_stick + progress * (self.hard_stick - self.easy_stick)
-        small = mode == 1
-        amp[small] = torch.minimum(amp[small], torch.full_like(amp[small], self.medium_stick))
-        hover_or_release = (mode == 0) | (mode == 5)
-        amp[hover_or_release] = 0.0
+        hover = mode == 0
+        amp[hover] = 0.0
         hard = (mode == 2) | (mode == 3) | (mode == 4)
         amp[hard] = torch.clamp(amp[hard], min=self.medium_stick, max=self.hard_stick)
         return amp
 
-    def _px4_process_stick(self, raw, state, tau):
-        if self.stick_noise_std > 0.0:
-            raw = torch.clamp(raw + torch.randn_like(raw) * self.stick_noise_std, -1.0, 1.0)
+    def _curriculum_vx_forward_limit(self, level, mode):
+        if (not self.curriculum_enable) or (not self.vx_forward_curriculum_enable):
+            return torch.full((level.numel(),), self.vx_max, device=self.device)
 
+        sublevel = (level % self.levels_per_mode).float()
+        denom = max(float(self.levels_per_mode - 1), 1.0)
+        progress = torch.clamp(sublevel / denom, 0.0, 1.0)
+        first_half = progress <= 0.5
+        early = self.vx_forward_easy_max + (
+            self.vx_forward_medium_max - self.vx_forward_easy_max
+        ) * (progress / 0.5)
+        late = self.vx_forward_medium_max + (
+            self.vx_max - self.vx_forward_medium_max
+        ) * ((progress - 0.5) / 0.5)
+        limit = torch.where(first_half, early, late)
+        lower = min(max(0.0, self.vx_forward_easy_max), self.vx_max)
+        limit = torch.clamp(limit, min=lower, max=self.vx_max)
+
+        hover = mode == 0
+        return torch.where(
+            hover,
+            torch.full_like(limit, self.vx_forward_easy_max),
+            limit,
+        )
+
+    def _shape_stick_input(self, raw):
         abs_raw = torch.abs(raw)
         denom = max(1.0 - self.deadzone, 1e-6)
         x = torch.where(
@@ -401,17 +644,107 @@ class RCHumanTask(BaseTask):
             torch.sign(raw) * (abs_raw - self.deadzone) / denom,
         )
         x = (1.0 - self.expo) * x + self.expo * x * x * x
+        return x
 
-        max_delta = self.stick_slew_rate * self.dt
-        x = state + torch.clamp(x - state, -max_delta, max_delta)
+    def _limit_stick_unit_length_xy(self, stick_x, stick_y):
+        norm = torch.sqrt(stick_x * stick_x + stick_y * stick_y)
+        scale = torch.clamp(norm, min=1.0)
+        return stick_x / scale, stick_y / scale
 
+    def _px4_process_stick(self, raw, state, tau):
+        if self.stick_noise_std > 0.0:
+            raw = torch.clamp(raw + torch.randn_like(raw) * self.stick_noise_std, -1.0, 1.0)
+
+        x = self._shape_stick_input(raw)
+        if tau <= 0.0:
+            return x
         alpha = self.dt / max(tau + self.dt, 1e-6)
         return state + alpha * (x - state)
 
-    def _advance_command(self, env, mask):
-        resample = mask & (self.dwell_left <= 0)
-        self._resample_raw_sticks(resample)
-        self.dwell_left[mask] = torch.clamp(self.dwell_left[mask] - 1, min=0)
+    def _raw_stick_tensor(self, idx):
+        return torch.stack((
+            self.raw_vx[idx],
+            self.raw_vy[idx],
+            self.raw_vz[idx],
+            self.raw_yaw[idx],
+        ), dim=1)
+
+    def _desired_raw_stick_tensor(self, idx):
+        return torch.stack((
+            self.desired_raw_vx[idx],
+            self.desired_raw_vy[idx],
+            self.desired_raw_vz[idx],
+            self.desired_raw_yaw[idx],
+        ), dim=1)
+
+    def _set_raw_stick_tensor(self, idx, values):
+        self.raw_vx[idx] = values[:, 0]
+        self.raw_vy[idx] = values[:, 1]
+        self.raw_vz[idx] = values[:, 2]
+        self.raw_yaw[idx] = values[:, 3]
+
+    def _apply_raw_stick_rate_limit(self, mask):
+        if int(torch.sum(mask).item()) == 0:
+            return
+
+        idx = torch.where(mask)[0]
+        desired = self._desired_raw_stick_tensor(idx)
+        current = self._raw_stick_tensor(idx)
+        delta = desired - current
+        limit_frac = float(self.command_rate_limit_frac)
+        if limit_frac > 0.0:
+            max_delta = torch.full_like(delta, abs(limit_frac))
+            clipped_delta = torch.clamp(delta, -max_delta, max_delta)
+            limited = current + clipped_delta
+            rate_limited = torch.any(torch.abs(delta) > (max_delta + 1e-6), dim=1)
+        else:
+            clipped_delta = delta
+            limited = desired
+            rate_limited = torch.zeros(idx.numel(), dtype=torch.bool, device=self.device)
+
+        limited = torch.clamp(limited, -1.0, 1.0)
+        self._set_raw_stick_tensor(idx, limited)
+        self.command_rate_limited[idx] = rate_limited
+        self.command_raw_delta[idx] = torch.max(torch.abs(clipped_delta), dim=1).values
+
+    def _scale_vx_stick(self, stick, forward_limit):
+        return torch.where(
+            stick >= 0.0,
+            stick * forward_limit,
+            stick * abs(self.vx_min),
+        )
+
+    def _update_px4_vtol_mc_targets_from_sticks(self, mask, env):
+        stick_vx, stick_vy = self._limit_stick_unit_length_xy(
+            self.stick_vx[mask], self.stick_vy[mask]
+        )
+        self.stick_vx[mask] = stick_vx
+        self.stick_vy[mask] = stick_vy
+
+        self.target_vx[mask] = self._scale_vx_stick(
+            stick_vx, self.vx_forward_limit[mask]
+        )
+        self.target_vy[mask] = stick_vy * self.vy_limit
+        self.target_vz[mask] = self.stick_vz[mask] * self.vz_limit
+        self.target_yaw_rate[mask] = self.stick_yaw[mask] * self.yaw_rate_limit
+
+        _npos, _epos, altitude = env.model.get_position()
+        _roll, _pitch, _heading = env.model.get_posture()
+        high = mask & (altitude > self.alt_high) & (self.target_vz > 0.0)
+        low = mask & (altitude < self.alt_low) & (self.target_vz < 0.0)
+        self.target_vz[high | low] = 0.0
+        self.stick_vz[high | low] = 0.0
+
+        self.target_heading[mask] = wrap_PI(
+            self.target_heading[mask] + self.target_yaw_rate[mask] * self.dt
+        )
+        self.target_vn[mask], self.target_ve[mask] = self.local_to_ground_velocity(
+            self.target_vx[mask], self.target_vy[mask], self.target_heading[mask]
+        )
+
+    def _apply_px4_vtol_mc_manual_sticks(self, mask, env):
+        if int(torch.sum(mask).item()) == 0:
+            return
 
         self.stick_vx[mask] = self._px4_process_stick(
             self.raw_vx[mask], self.stick_vx[mask], self.velocity_tau
@@ -425,25 +758,74 @@ class RCHumanTask(BaseTask):
         self.stick_yaw[mask] = self._px4_process_stick(
             self.raw_yaw[mask], self.stick_yaw[mask], self.yaw_tau
         )
+        self._update_px4_vtol_mc_targets_from_sticks(mask, env)
 
-        self.target_vx[mask] = self.stick_vx[mask] * self.vx_limit
-        self.target_vy[mask] = self.stick_vy[mask] * self.vy_limit
-        self.target_vz[mask] = self.stick_vz[mask] * self.vz_limit
-        self.target_yaw_rate[mask] = self.stick_yaw[mask] * self.yaw_rate_limit
+    def _update_mode5_release_state(self, env, mask):
+        active_hold = mask & (self.mode5_release_state == 1)
+        if torch.any(active_hold):
+            self.mode5_hold_elapsed[active_hold] += 1
+            _roll, _pitch, heading = env.model.get_posture()
+            vx_n, vy_e = env.model.get_ground_speed()
+            local_vx, _local_vy = self.ground_to_local_velocity(vx_n, vy_e, heading)
+            shaped = self._shape_stick_input(self.mode5_pre_release_raw[active_hold])
+            intended_vx = self._scale_vx_stick(
+                shaped, self.vx_forward_limit[active_hold]
+            )
+            enough_command = self.target_vx[active_hold] >= (
+                intended_vx * self.mode5_release_target_frac
+            )
+            near_speed = torch.abs(
+                local_vx[active_hold] - self.target_vx[active_hold]
+            ) < self.mode5_release_speed_error
+            min_elapsed = self.mode5_hold_elapsed[active_hold] >= self.mode5_hold_min_steps
+            timeout = self.mode5_hold_elapsed[active_hold] >= self.mode5_hold_max_steps
+            release_now_local = timeout | (min_elapsed & enough_command & near_speed)
 
-        _npos, _epos, altitude = env.model.get_position()
-        _roll, _pitch, heading = env.model.get_posture()
-        high = mask & (altitude > self.alt_high) & (self.target_vz > 0.0)
-        low = mask & (altitude < self.alt_low) & (self.target_vz < 0.0)
-        self.target_vz[high | low] = 0.0
-        self.stick_vz[high | low] = 0.0
+            if torch.any(release_now_local):
+                active_idx = torch.where(active_hold)[0]
+                release_idx = active_idx[release_now_local]
+                self.desired_raw_vx[release_idx] = 0.0
+                self.desired_raw_vy[release_idx] = 0.0
+                self.desired_raw_vz[release_idx] = 0.0
+                self.desired_raw_yaw[release_idx] = 0.0
+                self.mode5_release_state[release_idx] = 2
+                self.mode5_recovery_left[release_idx] = max(
+                    self.mode5_release_recovery_steps,
+                    1,
+                )
+                self.dwell_left[release_idx] = max(
+                    self.mode5_release_recovery_steps,
+                    1,
+                )
+                self.command_transient_left[release_idx] = max(
+                    self.command_transient_grace_steps,
+                    self.mode5_release_recovery_steps,
+                    0,
+                )
 
-        self.target_heading[mask] = wrap_PI(
-            self.target_heading[mask] + self.target_yaw_rate[mask] * self.dt
-        )
-        self.target_vn[mask], self.target_ve[mask] = self.local_to_ground_velocity(
-            self.target_vx[mask], self.target_vy[mask], self.target_heading[mask]
-        )
+        active_released = mask & (self.mode5_release_state == 2)
+        if torch.any(active_released):
+            self.mode5_recovery_left[active_released] = torch.clamp(
+                self.mode5_recovery_left[active_released] - 1,
+                min=0,
+            )
+            recovered = active_released & (self.mode5_recovery_left <= 0)
+            if torch.any(recovered):
+                self.mode5_release_state[recovered] = 0
+                self.mode5_hold_elapsed[recovered] = 0
+                self.mode5_pre_release_raw[recovered] = 0.0
+                self.dwell_left[recovered] = 0
+
+    def _advance_command(self, env, mask):
+        self._update_mode5_release_state(env, mask)
+        resample = mask & (self.dwell_left <= 0) & (self.mode5_release_state == 0)
+        self._resample_raw_sticks(resample)
+        self._apply_raw_stick_rate_limit(mask)
+        self.dwell_left[mask] = torch.clamp(self.dwell_left[mask] - 1, min=0)
+        self.command_transient_left[mask] = torch.clamp(
+            self.command_transient_left[mask] - 1, min=0)
+
+        self._apply_px4_vtol_mc_manual_sticks(mask, env)
 
     def _apply_sensor_noise(self, roll, pitch, heading, vx, vy, vz, p, q, r):
         roll = wrap_PI(roll + torch.randn_like(roll) * self.sensor_att_std)

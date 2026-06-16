@@ -1,39 +1,59 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PPO adversary training for rc_human with command, observation, and Dryden
-# wind attacks enabled.
+# PPO adversary training for rc_human with PX4 VTOL-MC manual stick mapping.
 #
-# The victim policy is fixed.  Sensor noise and Dryden random noise are disabled.
-# Wind attacks still pass through a deterministic Dryden shaping filter.
-# By default the adversary generates:
-#   - command space: raw PX4 vx/vy/vz/yaw sticks
+# PX4 VTOL in multicopter mode uses the multicopter manual-control path.  This
+# script keeps all three attack surfaces enabled:
+#   - command space: raw vx/vy/vz/yaw sticks before PX4 VTOL-MC stick mapping
 #   - observation space: normalized policy observation perturbations
 #   - wind space: Dryden N/E/D velocity + body p/q/r gust targets
-# Add --adv-use-random-command to keep rc_human's original random command
-# generator and attack only observation/wind.
 #
 # Run:
 #   cd /home/a/demo/Hybrid_adv
-#   bash scripts/train_rc_human_adversary.sh
+#   bash scripts/train_rc_human_adversary_vtol_mc_px4stick_cmd_obs_wind.sh
 # ---------------------------------------------------------------------------
-set -e
+set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
 PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
 DEVICE="${DEVICE:-cuda:0}"
-VICTIM_CKPT="${VICTIM_CKPT:-/home/a/demo/Hybrid_adv/scripts/runs/2026-06-03_15-49-07_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_modes012534_to_ep650_20260603_154906/episode_650/actor_latest.ckpt}"
-EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_cmd_obs_dryden_wind_from_ep650}"
-N_ROLLOUT_THREADS="${ADV_N_ROLLOUT_THREADS:-1024}"
-BUFFER_SIZE="${ADV_BUFFER_SIZE:-3000}"
+VICTIM_CKPT="${VICTIM_CKPT:-${REPO_ROOT}/scripts/runs/2026-06-03_15-49-07_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_modes012534_to_ep650_20260603_154906/episode_650/actor_latest.ckpt}"
+EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_vtol_mc_px4stick_cmd_obs_dryden_wind_from_ep650}"
+RUN_DIR="${RUN_DIR:-}"
+
+N_ROLLOUT_THREADS="${ADV_N_ROLLOUT_THREADS:-1536}"
+BUFFER_SIZE="${ADV_BUFFER_SIZE:-1500}"
 MAX_ITERATIONS="${ADV_MAX_ITERATIONS:-1000}"
 NUM_ENV_STEPS="${ADV_NUM_ENV_STEPS:-$((N_ROLLOUT_THREADS * BUFFER_SIZE * MAX_ITERATIONS))}"
 PPO_EPOCH="${ADV_PPO_EPOCH:-8}"
 NUM_MINI_BATCH="${ADV_NUM_MINI_BATCH:-32}"
+SAVE_INTERVAL="${ADV_SAVE_INTERVAL:-10}"
 
-echo "adversary training: rollout_threads=${N_ROLLOUT_THREADS}, buffer_size=${BUFFER_SIZE}, max_iterations=${MAX_ITERATIONS}, num_env_steps=${NUM_ENV_STEPS}, ppo_epoch=${PPO_EPOCH}, num_mini_batch=${NUM_MINI_BATCH}"
+export RC_HUMAN_MODE_ORDER="${RC_HUMAN_MODE_ORDER:-0 1 2 5 3 4}"
+export RC_HUMAN_MAX_MODE_SLOTS="${RC_HUMAN_MAX_MODE_SLOTS:-6}"
+
+if [ ! -x "${PYTHON_BIN}" ]; then
+    echo "Python executable not found or not executable: ${PYTHON_BIN}" >&2
+    exit 1
+fi
+
+echo "adversary training: exp=${EXP}"
+echo "  victim_ckpt: ${VICTIM_CKPT}"
+echo "  rollout_threads: ${N_ROLLOUT_THREADS}"
+echo "  buffer_size: ${BUFFER_SIZE}"
+echo "  max_iterations: ${MAX_ITERATIONS}"
+echo "  num_env_steps: ${NUM_ENV_STEPS}"
+echo "  ppo_epoch: ${PPO_EPOCH}"
+echo "  num_mini_batch: ${NUM_MINI_BATCH}"
+
+RUN_DIR_ARGS=()
+if [ -n "${RUN_DIR}" ]; then
+    RUN_DIR_ARGS=(--run-dir "${RUN_DIR}")
+    echo "  run_dir: ${RUN_DIR}"
+fi
 
 "${PYTHON_BIN}" "${REPO_ROOT}/scripts/adversarial/train_rc_human_adversary.py" \
     --victim-ckpt "${VICTIM_CKPT}" \
@@ -41,7 +61,8 @@ echo "adversary training: rollout_threads=${N_ROLLOUT_THREADS}, buffer_size=${BU
     --seed 17 --device "${DEVICE}" --cuda \
     --n-rollout-threads "${N_ROLLOUT_THREADS}" --buffer-size "${BUFFER_SIZE}" --num-env-steps "${NUM_ENV_STEPS}" \
     --max-iterations "${MAX_ITERATIONS}" \
-    --log-interval 1 --save-interval 10 \
+    --log-interval 1 --save-interval "${SAVE_INTERVAL}" \
+    "${RUN_DIR_ARGS[@]}" \
     --lr 3e-4 --gamma 0.99 --gae-lambda 0.95 \
     --ppo-epoch "${PPO_EPOCH}" --num-mini-batch "${NUM_MINI_BATCH}" --clip-param 0.2 \
     --entropy-coef 2e-3 --max-grad-norm 1.0 \

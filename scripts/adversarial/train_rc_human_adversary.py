@@ -24,9 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT))
 
 from algorithms.adversarial.rc_human_adv_env import RCHumanAdversarialEnv  # noqa: E402
+from algorithms.adversarial.ppo_policy import AdversarialPPOPolicy         # noqa: E402
+from algorithms.adversarial.ppo_trainer import AdversarialPPOTrainer       # noqa: E402
 from algorithms.ppo.ppo_actor import PPOActor                              # noqa: E402
-from algorithms.ppo.ppo_policy import PPOPolicy                            # noqa: E402
-from algorithms.ppo.ppo_trainer import PPOTrainer                          # noqa: E402
 from algorithms.utils.buffer import ReplayBuffer                           # noqa: E402
 from envs.control_env import ControlEnv                                     # noqa: E402
 
@@ -66,18 +66,10 @@ def parse_args():
     p.add_argument("--value-loss-coef", type=float, default=1.0)
     p.add_argument("--entropy-coef", type=float, default=2e-3)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
-    p.add_argument("--hidden-size", type=str, default="128 128")
-    p.add_argument("--act-hidden-size", type=str, default="128 128")
+    p.add_argument("--hidden-size", type=str, default="128 128 128",
+                   help="Adversary MLP hidden layers. The paper adversary uses a 3-hidden-layer MLP.")
     p.add_argument("--activation-id", type=int, default=1)
     p.add_argument("--gain", type=float, default=0.01)
-    p.add_argument("--no-feature-normalization",
-                   dest="use_feature_normalization", action="store_false")
-    p.set_defaults(use_feature_normalization=True)
-    p.add_argument("--no-recurrent-policy",
-                   dest="use_recurrent_policy", action="store_false")
-    p.set_defaults(use_recurrent_policy=True)
-    p.add_argument("--recurrent-hidden-size", type=int, default=128)
-    p.add_argument("--recurrent-hidden-layers", type=int, default=1)
     p.add_argument("--data-chunk-length", type=int, default=8)
 
     # Victim architecture.
@@ -88,11 +80,12 @@ def parse_args():
     p.add_argument("--victim-deterministic", action="store_true", default=True)
 
     # Attack bounds, expressed as fractions of existing task randomization/noise ranges.
-    # Defaults are intentionally mild; increase these only after the adversary
-    # learns non-saturating risk cases.
-    p.add_argument("--adv-command-frac", type=float, default=0.18)
-    p.add_argument("--adv-obs-frac", type=float, default=0.6)
-    p.add_argument("--adv-wind-frac", type=float, default=0.5)
+    # Command attack acts on raw PX4 stick inputs and defaults to the full stick range.
+    # Wind attack drives Dryden velocity and angular-rate gust targets; the model
+    # receives only Dryden-shaped wind outputs.
+    p.add_argument("--adv-command-frac", type=float, default=1.0)
+    p.add_argument("--adv-obs-frac", type=float, default=1.0)
+    p.add_argument("--adv-wind-frac", type=float, default=1.0)
     p.add_argument("--adv-use-random-command", action="store_true", default=False,
                    help="If set, do not attack command space; use rc_human's original command generator.")
     p.add_argument("--adv-command-random-base", action="store_true", default=False,
@@ -100,27 +93,56 @@ def parse_args():
                         "rc_human's randomized command generator instead of replacing it.")
     p.add_argument("--adv-obs-default-scale", type=float, default=0.02)
     p.add_argument("--adv-obs-max-scale", type=float, default=0.10)
-    p.add_argument("--adv-command-alpha", type=float, default=0.20)
-    p.add_argument("--adv-obs-alpha", type=float, default=0.25)
-    p.add_argument("--adv-wind-alpha", type=float, default=0.15)
+    p.add_argument("--adv-command-alpha", type=float, default=1.0)
+    p.add_argument("--adv-obs-alpha", type=float, default=1.0)
+    p.add_argument("--adv-wind-alpha", type=float, default=1.0)
+    p.add_argument("--adv-command-rate-limit-frac", type=float, default=0.0,
+                   help="Maximum per-step raw-stick attack change as a fraction of command attack range. "
+                        "0 disables adversary-side limiting; PX4 stick filtering still applies.")
+    p.add_argument("--adv-obs-rate-limit-frac", type=float, default=0.1,
+                   help="Maximum per-step observation attack change as a fraction of observation attack range.")
+    p.add_argument("--adv-wind-rate-limit-frac", type=float, default=0.1,
+                   help="Maximum per-step wind attack change as a fraction of wind attack range.")
     p.add_argument("--adv-init-log-std", type=float, default=-1.2,
                    help="Initial adversary Gaussian log std. -1.2 gives std ~= 0.30.")
 
-    # Adversary objective matching the requested formula.
+    # Eq. 2 final term: -lambda * prod_i ||W_i||_inf, added to PPO loss.
+    p.add_argument("--adv-lipschitz-coef", type=float, default=1e-6,
+                   help="Coefficient for adversary actor weight infinity-norm product regularization.")
     p.add_argument("--adv-alive-penalty", type=float, default=0.01)
-    p.add_argument("--adv-policy-reward-weight", type=float, default=0.05)
-    p.add_argument("--adv-w-vel-error", type=float, default=2.0)
-    p.add_argument("--adv-w-yaw-error", type=float, default=1.0)
+    p.add_argument("--adv-policy-reward-weight", type=float, default=0.15)
+    p.add_argument("--adv-policy-reward-window", type=int, default=10,
+                   help="Recent victim reward window used by the -victim_reward adversary term.")
+    p.add_argument("--adv-w-vel-error", type=float, default=4.0)
+    p.add_argument("--adv-w-axis-vel-error", type=float, default=2.0)
+    p.add_argument("--adv-w-yaw-error", type=float, default=2.0)
+    p.add_argument("--adv-axis-vel-margin", type=float, default=0.25)
+    p.add_argument("--adv-yaw-margin-deg", type=float, default=6.0)
+    p.add_argument("--adv-w-vel-bad-margin", type=float, default=8.0)
+    p.add_argument("--adv-w-yaw-bad-margin", type=float, default=4.0)
     p.add_argument("--adv-w-attitude", type=float, default=5.0)
     p.add_argument("--adv-w-omega", type=float, default=0.8)
     p.add_argument("--adv-w-force-margin", type=float, default=0.2)
     p.add_argument("--adv-bad-done-bonus", type=float, default=50.0)
-    p.add_argument("--adv-linf-penalty", type=float, default=0.20)
-    p.add_argument("--adv-smooth-penalty", type=float, default=0.10)
+    p.add_argument("--adv-linf-penalty", type=float, default=0.0)
+    p.add_argument("--adv-smooth-penalty", type=float, default=0.0)
+    p.add_argument("--adv-command-smooth-penalty", type=float, default=0.0)
+    p.add_argument("--adv-obs-smooth-penalty", type=float, default=0.0)
+    p.add_argument("--adv-wind-smooth-penalty", type=float, default=0.0)
+    p.add_argument("--adv-command-target-rms-min", type=float, default=0.25)
+    p.add_argument("--adv-command-target-rms-max", type=float, default=0.75)
+    p.add_argument("--adv-obs-target-rms-min", type=float, default=0.45)
+    p.add_argument("--adv-obs-target-rms-max", type=float, default=1.10)
+    p.add_argument("--adv-wind-target-rms-min", type=float, default=0.35)
+    p.add_argument("--adv-wind-target-rms-max", type=float, default=0.90)
+    p.add_argument("--adv-command-range-penalty", type=float, default=0.0)
+    p.add_argument("--adv-obs-range-penalty", type=float, default=0.0)
+    p.add_argument("--adv-wind-range-penalty", type=float, default=0.0)
+    p.add_argument("--adv-saturation-penalty", type=float, default=0.0)
     p.add_argument("--adv-raw-excess-penalty", type=float, default=0.20)
     p.add_argument("--adv-obs-energy-window", type=int, default=50)
     p.add_argument("--adv-obs-energy-budget", type=float, default=50.0)
-    p.add_argument("--adv-obs-energy-penalty", type=float, default=0.05)
+    p.add_argument("--adv-obs-energy-penalty", type=float, default=0.02)
     p.add_argument("--adv-attitude-safe-rad", type=float, default=0.20)
     p.add_argument("--adv-omega-safe-rad", type=float, default=1.2)
     return p.parse_args()
@@ -143,19 +165,23 @@ def make_policy_args(args, action_dim=None, is_victim=False):
         act_hidden = args.victim_act_hidden_size
         rnn_h = args.victim_recurrent_hidden_size
         rnn_l = args.victim_recurrent_hidden_layers
+        use_feature_normalization = True
+        use_recurrent_policy = True
     else:
         hidden = args.hidden_size
-        act_hidden = args.act_hidden_size
-        rnn_h = args.recurrent_hidden_size
-        rnn_l = args.recurrent_hidden_layers
+        act_hidden = ""
+        rnn_h = 1
+        rnn_l = 1
+        use_feature_normalization = False
+        use_recurrent_policy = False
 
     ns = SimpleNamespace()
     ns.gain = args.gain
     ns.hidden_size = hidden
     ns.act_hidden_size = act_hidden
     ns.activation_id = args.activation_id
-    ns.use_feature_normalization = args.use_feature_normalization
-    ns.use_recurrent_policy = args.use_recurrent_policy
+    ns.use_feature_normalization = use_feature_normalization
+    ns.use_recurrent_policy = use_recurrent_policy
     ns.recurrent_hidden_size = rnn_h
     ns.recurrent_hidden_layers = rnn_l
     ns.use_prior = False
@@ -166,6 +192,8 @@ def make_policy_args(args, action_dim=None, is_victim=False):
     ns.num_mini_batch = args.num_mini_batch
     ns.value_loss_coef = args.value_loss_coef
     ns.entropy_coef = args.entropy_coef
+    ns.adv_lipschitz_coef = getattr(args, "adv_lipschitz_coef", 0.0)
+    ns.adv_action_bound = 1.0
     ns.use_max_grad_norm = True
     ns.max_grad_norm = args.max_grad_norm
     ns.data_chunk_length = args.data_chunk_length
@@ -194,6 +222,11 @@ def load_victim(env, args, device):
 
 def set_initial_action_std(policy, log_std):
     """Start adversary with moderate exploration instead of unit-std noise."""
+    if hasattr(policy.actor, "log_std"):
+        with torch.no_grad():
+            policy.actor.log_std.fill_(float(log_std))
+        return
+
     modules = [policy.actor.act]
     for module in modules:
         action_out = getattr(module, "action_out", None)
@@ -214,53 +247,65 @@ def save_adversary(policy, run_dir, episode):
 def collect_rollout(env, policy, buffer, args, device):
     policy.prep_rollout()
     n = env.n
-    obs = buffer.obs[0].reshape(n, -1)
-    rnn_actor = buffer.rnn_states_actor[0].reshape(
-        n, args.recurrent_hidden_layers, args.recurrent_hidden_size
+    obs = torch.as_tensor(
+        buffer.obs[0].reshape(n, -1), dtype=torch.float32, device=device
     )
-    rnn_critic = buffer.rnn_states_critic[0].reshape(
-        n, args.recurrent_hidden_layers, args.recurrent_hidden_size
+    rnn_actor = torch.as_tensor(
+        buffer.rnn_states_actor[0].reshape(
+            n, args.recurrent_hidden_layers, args.recurrent_hidden_size
+        ),
+        dtype=torch.float32,
+        device=device,
     )
-    masks = buffer.masks[0].reshape(n, 1)
+    rnn_critic = torch.as_tensor(
+        buffer.rnn_states_critic[0].reshape(
+            n, args.recurrent_hidden_layers, args.recurrent_hidden_size
+        ),
+        dtype=torch.float32,
+        device=device,
+    )
+    masks = torch.as_tensor(
+        buffer.masks[0].reshape(n, 1), dtype=torch.float32, device=device
+    )
 
     metrics = []
-    for step in range(args.buffer_size):
-        values, actions, logp, rnn_actor_next, rnn_critic_next = policy.get_actions(
-            obs, rnn_actor, rnn_critic, masks
-        )
-        next_obs, rewards, done, bad_done, exceed, _info = env.step(actions)
-        reset = (done | bad_done | exceed).reshape(-1)
-
-        masks_next = torch.ones((n, 1), device=device)
-        masks_next[reset] = 0.0
-        bad_masks_next = torch.ones((n, 1), device=device)
-        bad_masks_next[bad_done.reshape(-1)] = 0.0
-        rnn_actor_next[reset] = 0.0
-        rnn_critic_next[reset] = 0.0
-
-        buffer.insert(
-            t2n(next_obs).reshape(args.n_rollout_threads, 1, -1),
-            t2n(actions).reshape(args.n_rollout_threads, 1, -1),
-            t2n(rewards).reshape(args.n_rollout_threads, 1, 1),
-            t2n(masks_next).reshape(args.n_rollout_threads, 1, 1),
-            t2n(logp).reshape(args.n_rollout_threads, 1, 1),
-            t2n(values).reshape(args.n_rollout_threads, 1, 1),
-            t2n(rnn_actor_next).reshape(args.n_rollout_threads, 1,
-                                        args.recurrent_hidden_layers,
-                                        args.recurrent_hidden_size),
-            t2n(rnn_critic_next).reshape(args.n_rollout_threads, 1,
-                                         args.recurrent_hidden_layers,
-                                         args.recurrent_hidden_size),
-            t2n(bad_masks_next).reshape(args.n_rollout_threads, 1, 1),
-        )
-
-        metrics.append(dict(env.last_info))
-        obs = next_obs
-        rnn_actor = rnn_actor_next
-        rnn_critic = rnn_critic_next
-        masks = masks_next
-
     with torch.no_grad():
+        for step in range(args.buffer_size):
+            values, actions, logp, rnn_actor_next, rnn_critic_next = policy.get_actions(
+                obs, rnn_actor, rnn_critic, masks
+            )
+            next_obs, rewards, done, bad_done, exceed, _info = env.step(actions)
+            reset = (done | bad_done | exceed).reshape(-1)
+
+            masks_next = torch.ones((n, 1), device=device)
+            masks_next[reset] = 0.0
+            bad_masks_next = torch.ones((n, 1), device=device)
+            bad_masks_next[bad_done.reshape(-1)] = 0.0
+            rnn_actor_next[reset] = 0.0
+            rnn_critic_next[reset] = 0.0
+
+            buffer.insert(
+                t2n(next_obs).reshape(args.n_rollout_threads, 1, -1),
+                t2n(actions).reshape(args.n_rollout_threads, 1, -1),
+                t2n(rewards).reshape(args.n_rollout_threads, 1, 1),
+                t2n(masks_next).reshape(args.n_rollout_threads, 1, 1),
+                t2n(logp).reshape(args.n_rollout_threads, 1, 1),
+                t2n(values).reshape(args.n_rollout_threads, 1, 1),
+                t2n(rnn_actor_next).reshape(args.n_rollout_threads, 1,
+                                            args.recurrent_hidden_layers,
+                                            args.recurrent_hidden_size),
+                t2n(rnn_critic_next).reshape(args.n_rollout_threads, 1,
+                                             args.recurrent_hidden_layers,
+                                             args.recurrent_hidden_size),
+                t2n(bad_masks_next).reshape(args.n_rollout_threads, 1, 1),
+            )
+
+            metrics.append(dict(env.last_info))
+            obs = next_obs.detach()
+            rnn_actor = rnn_actor_next.detach()
+            rnn_critic = rnn_critic_next.detach()
+            masks = masks_next
+
         next_value = policy.get_values(obs, rnn_critic, masks)
     buffer.compute_returns(t2n(next_value).reshape(args.n_rollout_threads, 1, 1))
     return metrics
@@ -276,6 +321,58 @@ def mean_metrics(metrics):
         if vals:
             out[key] = float(np.mean(vals))
     return out
+
+
+def add_action_diagnostics(scalars, buffer, policy, env):
+    actions = buffer.actions.reshape(-1, env.adv_action_dim)
+    if actions.size == 0:
+        return
+    c_end = env.command_dim
+    o_end = c_end + env.obs_attack_dim
+    groups = (
+        ("command", actions[:, :c_end]),
+        ("obs", actions[:, c_end:o_end]),
+        ("wind", actions[:, o_end:]),
+    )
+    for name, values in groups:
+        if values.size == 0:
+            continue
+        abs_values = np.abs(values)
+        scalars[f"action/{name}_raw_abs"] = float(abs_values.mean())
+        scalars[f"action/{name}_raw_linf"] = float(abs_values.max(axis=1).mean())
+        scalars[f"action/{name}_raw_saturation_frac"] = float((abs_values > 0.98).mean())
+        scalars[f"action/{name}_raw_std"] = float(values.std())
+    wind_values = actions[:, o_end:]
+    if wind_values.shape[1] >= 6:
+        for name, values in (
+            ("wind_velocity", wind_values[:, :3]),
+            ("wind_pqr", wind_values[:, 3:6]),
+        ):
+            abs_values = np.abs(values)
+            scalars[f"action/{name}_raw_abs"] = float(abs_values.mean())
+            scalars[f"action/{name}_raw_linf"] = float(abs_values.max(axis=1).mean())
+            scalars[f"action/{name}_raw_saturation_frac"] = float((abs_values > 0.98).mean())
+            scalars[f"action/{name}_raw_std"] = float(values.std())
+
+    all_abs = np.abs(actions)
+    scalars["action/all_raw_abs"] = float(all_abs.mean())
+    scalars["action/all_raw_linf"] = float(all_abs.max(axis=1).mean())
+    scalars["action/all_raw_saturation_frac"] = float((all_abs > 0.98).mean())
+    if hasattr(policy.actor, "log_std"):
+        log_std = policy.actor.log_std.detach().cpu().numpy()
+        std = np.exp(log_std)
+        std_groups = (
+            ("command", std[:c_end]),
+            ("obs", std[c_end:o_end]),
+            ("wind", std[o_end:]),
+        )
+        scalars["policy/log_std_mean"] = float(log_std.mean())
+        scalars["policy/std_mean"] = float(std.mean())
+        for name, values in std_groups:
+            if values.size:
+                scalars[f"policy/{name}_std_mean"] = float(values.mean())
+                scalars[f"policy/{name}_std_min"] = float(values.min())
+                scalars[f"policy/{name}_std_max"] = float(values.max())
 
 
 def main():
@@ -304,9 +401,9 @@ def main():
     env = RCHumanAdversarialEnv(base_env, victim, args, device)
 
     adv_args = make_policy_args(args, action_dim=env.adv_action_dim)
-    adv_policy = PPOPolicy(adv_args, env.observation_space, env.action_space, device)
+    adv_policy = AdversarialPPOPolicy(adv_args, env.observation_space, env.action_space, device)
     set_initial_action_std(adv_policy, args.adv_init_log_std)
-    trainer = PPOTrainer(adv_args, device)
+    trainer = AdversarialPPOTrainer(adv_args, device)
     buffer = ReplayBuffer(adv_args, env.num_agents, env.observation_space, env.action_space)
     buffer.obs[0] = t2n(env.reset()).reshape(args.n_rollout_threads, 1, -1)
 
@@ -327,10 +424,20 @@ def main():
         requested_episodes,
         args.max_iterations,
     )
+    logging.info(
+        "adversary_policy=MLP hidden='%s' rate_limit=(cmd %.3f, obs %.3f, wind %.3f) "
+        "policy_reward_window=%d eq2_lambda=%g",
+        adv_args.hidden_size,
+        args.adv_command_rate_limit_frac,
+        args.adv_obs_rate_limit_frac,
+        args.adv_wind_rate_limit_frac,
+        args.adv_policy_reward_window,
+        adv_args.adv_lipschitz_coef,
+    )
 
     total_steps = 0
     for episode in range(episodes):
-        metrics = collect_rollout(env, adv_policy, buffer, args, device)
+        metrics = collect_rollout(env, adv_policy, buffer, adv_args, device)
         adv_policy.prep_training()
         train_info = trainer.train(adv_policy, buffer)
         buffer.after_update()
@@ -339,6 +446,7 @@ def main():
         if episode % args.log_interval == 0:
             scalars = mean_metrics(metrics)
             scalars.update({f"train/{k}": v for k, v in train_info.items()})
+            add_action_diagnostics(scalars, buffer, adv_policy, env)
             reward_mean = float(np.mean(buffer.rewards))
             rollout_return = float(np.sum(buffer.rewards) / max(args.n_rollout_threads, 1))
             scalars["adv/mean_reward"] = reward_mean

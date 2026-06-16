@@ -28,12 +28,49 @@ venv/
 env/
 ENV/
 
-# Training logs and non-weight outputs
+# Training outputs
 wandb/
 logs/
+runs/
+scripts/runs/
+checkpoints/
+checkpoint/
+weights/
+saved_models/
 *.log
-*.onnx
 events.out.tfevents*
+
+# ML model weights / checkpoints
+*.pt
+*.pt2
+*.pth
+*.pth.tar
+*.ckpt
+*.ckpt*
+ckpt-*
+checkpoint
+*.safetensors
+*.bin
+*.weights
+*.weights.*
+*.params
+*.pdparams
+*.h5
+*.hdf5
+*.keras
+*.pb
+*.onnx
+*.tflite
+*.engine
+*.plan
+*.trt
+*.uff
+*.dlc
+*.mlmodel
+*.caffemodel
+*.pkl
+*.pickle
+*.joblib
 
 # Render / evaluation outputs
 renders/result/
@@ -58,6 +95,5 @@ example/data/
 envs/jsbsim/
 HybridPlane/
 
-# Keep small source model assets required by the F16 aero model.
-!envs/models/F16/model/*.pth
+# Keep small source metadata required by the F16 aero model.
 !envs/models/F16/model/*.csv

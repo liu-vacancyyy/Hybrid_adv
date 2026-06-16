@@ -16,6 +16,12 @@ class EnvDrydenTurbulence:
     Output is wind velocity in NED/world axes, in m/s.  The aircraft model is
     responsible for converting that wind to body axes before computing relative
     airspeed, alpha and beta.
+
+    If ``enable_dryden_angular_turbulence`` is set, it also generates a
+    body-frame angular-rate gust ``gust_pqr_body`` in rad/s.  Adversarial
+    training can pass bounded velocity / angular-rate targets into ``step``;
+    the same Dryden time constants then shape those targets instead of applying
+    raw step changes to the vehicle.
     """
 
     def __init__(self, config, n, device, dt):
@@ -49,14 +55,28 @@ class EnvDrydenTurbulence:
         )
         self.mean_wind_scale_min = float(getattr(config, 'dryden_mean_wind_scale_min', 1.0))
         self.mean_wind_scale_max = float(getattr(config, 'dryden_mean_wind_scale_max', 1.0))
+        self.external_tau_scale = float(getattr(config, 'dryden_external_tau_scale', 1.0))
+        self.external_tau_min = float(getattr(config, 'dryden_external_tau_min', self.dt))
+        self.external_tau_max = float(getattr(config, 'dryden_external_tau_max', 0.0))
+
+        self.enable_angular = bool(getattr(config, 'enable_dryden_angular_turbulence', True))
+        self.pqr_sigma_ref = float(getattr(config, 'dryden_pqr_sigma_ref', 0.12))
+        self.pqr_sigma_scale_min = float(getattr(config, 'dryden_pqr_sigma_scale_min', 0.8))
+        self.pqr_sigma_scale_max = float(getattr(config, 'dryden_pqr_sigma_scale_max', 1.2))
+        self.pqr_tau_p = float(getattr(config, 'dryden_pqr_tau_p', getattr(config, 'dryden_pqr_tau', 0.8)))
+        self.pqr_tau_q = float(getattr(config, 'dryden_pqr_tau_q', getattr(config, 'dryden_pqr_tau', 0.8)))
+        self.pqr_tau_r = float(getattr(config, 'dryden_pqr_tau_r', getattr(config, 'dryden_pqr_tau', 1.0)))
 
         self.gust_dryden_axes = torch.zeros((n, 3), device=device)
         self.gust_ned = torch.zeros((n, 3), device=device)
+        self.gust_pqr_body = torch.zeros((n, 3), device=device)
         self.mean_wind_ned = torch.zeros((n, 3), device=device)
         self.second_order_pos = torch.zeros((n, 2), device=device)
         self.second_order_rate = torch.zeros((n, 2), device=device)
         self.sigma = torch.ones((n, 3), device=device) * self.sigma_ref
         self.tau = torch.ones((n, 3), device=device)
+        self.pqr_sigma = torch.ones((n, 3), device=device) * self.pqr_sigma_ref
+        self.pqr_tau = torch.ones((n, 3), device=device)
         self.direction = torch.zeros(n, device=device)
 
     def _rand_uniform(self, low, high, size):
@@ -156,11 +176,42 @@ class EnvDrydenTurbulence:
         # tion instead of tying strength to altitude, because the paper fixes
         # turbulence intensity with sigma = 1.5 m/s.
         h = altitude.clamp(5.0, 300.0)
-        l_long = (200.0 + 0.5 * h) * scale
-        l_vert = (50.0 + 0.2 * h) * scale
+        if hasattr(self.config, 'dryden_length_longitudinal_m'):
+            l_long = torch.full(
+                (size,),
+                float(getattr(self.config, 'dryden_length_longitudinal_m')),
+                device=self.device,
+            ) * scale
+        else:
+            l_long = (200.0 + 0.5 * h) * scale
+        if hasattr(self.config, 'dryden_length_lateral_m'):
+            l_lat = torch.full(
+                (size,),
+                float(getattr(self.config, 'dryden_length_lateral_m')),
+                device=self.device,
+            ) * scale
+        else:
+            l_lat = l_long
+        if hasattr(self.config, 'dryden_length_vertical_m'):
+            l_vert = torch.full(
+                (size,),
+                float(getattr(self.config, 'dryden_length_vertical_m')),
+                device=self.device,
+            ) * scale
+        else:
+            l_vert = (50.0 + 0.2 * h) * scale
         self.tau[reset_mask, 0] = (l_long / airspeed).clamp_min(self.dt)
-        self.tau[reset_mask, 1] = (l_long / airspeed).clamp_min(self.dt)
+        self.tau[reset_mask, 1] = (l_lat / airspeed).clamp_min(self.dt)
         self.tau[reset_mask, 2] = (l_vert / airspeed).clamp_min(self.dt)
+
+        pqr_scale = self._fixed_or_random(
+            'dryden_pqr_sigma_scale', self.pqr_sigma_scale_min, self.pqr_sigma_scale_max,
+            size, default=1.0
+        ).clamp_min(0.0)
+        self.pqr_sigma[reset_mask, :] = self.pqr_sigma_ref * pqr_scale[:, None]
+        self.pqr_tau[reset_mask, 0] = max(self.pqr_tau_p, self.dt)
+        self.pqr_tau[reset_mask, 1] = max(self.pqr_tau_q, self.dt)
+        self.pqr_tau[reset_mask, 2] = max(self.pqr_tau_r, self.dt)
 
         if self.random_direction:
             self.direction[reset_mask] = self._rand_uniform(
@@ -170,12 +221,28 @@ class EnvDrydenTurbulence:
             self.direction[reset_mask] = math.radians(self.direction_deg)
 
         self.gust_dryden_axes[reset_mask, :] = 0.0
+        self.gust_pqr_body[reset_mask, :] = 0.0
         self.second_order_pos[reset_mask, :] = 0.0
         self.second_order_rate[reset_mask, :] = 0.0
         self._update_ned(reset_mask)
         return self.gust_ned
 
-    def step(self):
+    def step(self, excitation_ned=None, excitation_pqr_body=None):
+        if excitation_ned is not None:
+            self._step_external_velocity(excitation_ned)
+        else:
+            self._step_random_velocity()
+
+        if not self.enable_angular:
+            self.gust_pqr_body.zero_()
+        elif excitation_pqr_body is not None:
+            self._step_external_pqr(excitation_pqr_body)
+        else:
+            self._step_random_pqr()
+
+        return self.gust_ned
+
+    def _step_random_velocity(self):
         tau = self.tau.clamp_min(self.dt)
         decay_u = torch.exp(-self.dt / tau[:, 0])
         noise_u = self.sigma[:, 0] * torch.sqrt((1.0 - decay_u * decay_u).clamp_min(0.0))
@@ -201,7 +268,59 @@ class EnvDrydenTurbulence:
             self.gust_dryden_axes[:, out_axis] = gain * (xd_new + b * x_new)
 
         self._update_ned()
-        return self.gust_ned
+
+    def _effective_external_tau(self, base_tau):
+        tau = base_tau.clamp_min(self.dt) * max(self.external_tau_scale, 0.0)
+        tau = tau.clamp_min(max(self.external_tau_min, self.dt))
+        if self.external_tau_max > 0.0:
+            tau = tau.clamp_max(max(self.external_tau_max, self.dt))
+        return tau
+
+    def _ned_to_axes(self, gust_ned):
+        gust_ned = torch.as_tensor(gust_ned, dtype=torch.float32, device=self.device)
+        if gust_ned.ndim == 1:
+            gust_ned = gust_ned.reshape(1, 3).expand(self.n, 3)
+        delta = gust_ned - self.mean_wind_ned
+        along_n = torch.cos(self.direction)
+        along_e = torch.sin(self.direction)
+        n = delta[:, 0]
+        e = delta[:, 1]
+        d = delta[:, 2]
+        along = n * along_n + e * along_e
+        lateral = -n * along_e + e * along_n
+        return torch.stack((along, lateral, d), dim=1)
+
+    def _step_external_velocity(self, target_ned):
+        target_axes = self._ned_to_axes(target_ned)
+        tau = self._effective_external_tau(self.tau)
+        decay = torch.exp(-self.dt / tau)
+        self.gust_dryden_axes = (
+            decay * self.gust_dryden_axes
+            + (1.0 - decay) * target_axes
+        )
+        self.second_order_pos.zero_()
+        self.second_order_rate.zero_()
+        self._update_ned()
+
+    def _step_random_pqr(self):
+        tau = self.pqr_tau.clamp_min(self.dt)
+        decay = torch.exp(-self.dt / tau)
+        noise = self.pqr_sigma * torch.sqrt((1.0 - decay * decay).clamp_min(0.0))
+        self.gust_pqr_body = (
+            decay * self.gust_pqr_body
+            + noise * torch.randn((self.n, 3), device=self.device)
+        )
+
+    def _step_external_pqr(self, target_pqr):
+        target_pqr = torch.as_tensor(target_pqr, dtype=torch.float32, device=self.device)
+        if target_pqr.ndim == 1:
+            target_pqr = target_pqr.reshape(1, 3).expand(self.n, 3)
+        tau = self._effective_external_tau(self.pqr_tau)
+        decay = torch.exp(-self.dt / tau)
+        self.gust_pqr_body = (
+            decay * self.gust_pqr_body
+            + (1.0 - decay) * target_pqr
+        )
 
     def _update_ned(self, mask=None):
         if mask is None:

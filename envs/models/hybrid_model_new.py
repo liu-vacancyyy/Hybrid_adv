@@ -30,7 +30,7 @@ class HybridModelNew(HybridModel):
 
         # Replace old dynamics with wind-aware dynamics.  Nominal parameters are
         # intentionally identical, so zero-wind output should match HybridModel.
-        self.dynamics = HybridDynamicsNew()
+        self.dynamics = HybridDynamicsNew(config)
         self.mass_curr = torch.ones(self.n, device=self.device) * self.dynamics.nominal_m
         self._Jx_t = torch.ones(self.n, device=self.device) * self.dynamics.nominal_Jx
         self._Jy_t = torch.ones(self.n, device=self.device) * self.dynamics.nominal_Jy
@@ -42,6 +42,7 @@ class HybridModelNew(HybridModel):
         self.wind_enabled = bool(getattr(self.config, 'enable_wind', False))
         self.base_wind_ned = torch.zeros((self.n, 3), device=self.device)
         self.wind_ned = torch.zeros((self.n, 3), device=self.device)
+        self.wind_pqr_body = torch.zeros((self.n, 3), device=self.device)
         if self.wind_enabled:
             self.base_wind_ned = torch.stack(self._wind_from_config(), dim=1)
             self.set_wind_ned(
@@ -49,8 +50,10 @@ class HybridModelNew(HybridModel):
                 self.base_wind_ned[:, 1],
                 self.base_wind_ned[:, 2],
             )
+            self.set_wind_body_pqr(0.0, 0.0, 0.0)
         else:
             self.dynamics.set_wind_ned(None)
+            self.dynamics.set_wind_pqr_body(None)
 
     def _wind_from_config(self):
         north = float(getattr(self.config, 'wind_north', 0.0))
@@ -93,15 +96,37 @@ class HybridModelNew(HybridModel):
         ), dim=1)
         self.dynamics.set_wind_ned(self.wind_ned)
 
+    def set_wind_body_pqr(self, p=0.0, q=0.0, r=0.0, pqr_body=None):
+        """Set Dryden angular-rate gust in body axes, rad/s."""
+        if not self.wind_enabled:
+            self.wind_pqr_body.zero_()
+            self.dynamics.set_wind_pqr_body(None)
+            return
+        if pqr_body is not None:
+            pqr_body = pqr_body.to(device=self.device, dtype=torch.float32)
+            if pqr_body.ndim == 1:
+                pqr_body = pqr_body.reshape(1, 3).expand(self.n, 3)
+            self.wind_pqr_body = pqr_body
+        else:
+            self.wind_pqr_body = torch.stack((
+                self._expand_component(p),
+                self._expand_component(q),
+                self._expand_component(r),
+            ), dim=1)
+        self.dynamics.set_wind_pqr_body(self.wind_pqr_body)
+
     def set_gust_ned(self, north=0.0, east=0.0, down=0.0):
         """Alias for setting a one-direction gust vector."""
         self.set_wind_ned(north, east, down)
 
-    def set_wind_gust_ned(self, north=0.0, east=0.0, down=0.0):
+    def set_wind_gust_ned(self, north=0.0, east=0.0, down=0.0,
+                          p=0.0, q=0.0, r=0.0, pqr_body=None):
         """Apply an environment gust on top of the configured base wind."""
         if not self.wind_enabled:
             self.wind_ned.zero_()
+            self.wind_pqr_body.zero_()
             self.dynamics.set_wind_ned(None)
+            self.dynamics.set_wind_pqr_body(None)
             return
         gust_ned = torch.stack((
             self._expand_component(north),
@@ -110,9 +135,17 @@ class HybridModelNew(HybridModel):
         ), dim=1)
         total = self.base_wind_ned + gust_ned
         self.set_wind_ned(total[:, 0], total[:, 1], total[:, 2])
+        self.set_wind_body_pqr(p, q, r, pqr_body=pqr_body)
 
     def get_wind_ned(self):
         return self.wind_ned[:, 0], self.wind_ned[:, 1], self.wind_ned[:, 2]
+
+    def get_wind_pqr_body(self):
+        return (
+            self.wind_pqr_body[:, 0],
+            self.wind_pqr_body[:, 1],
+            self.wind_pqr_body[:, 2],
+        )
 
     def _wind_body(self):
         roll, pitch, yaw = self.get_posture()
@@ -125,6 +158,16 @@ class HybridModelNew(HybridModel):
         U, V, W = self.s[:, 6], self.s[:, 7], self.s[:, 8]
         wx_b, wy_b, wz_b = self._wind_body()
         return U - wx_b, V - wy_b, W - wz_b
+
+    def get_wind_force_body(self):
+        _ = self.get_extended_state()
+        force = self.dynamics.get_last_wind_force_body(self.n, self.device)
+        return force[:, 0], force[:, 1], force[:, 2]
+
+    def get_wind_moment_body(self):
+        _ = self.get_extended_state()
+        moment = self.dynamics.get_last_wind_moment_body(self.n, self.device)
+        return moment[:, 0], moment[:, 1], moment[:, 2]
 
     def get_vt(self):
         U, V, W = self.get_air_relative_velocity_body()
@@ -163,3 +206,14 @@ class HybridModelNew(HybridModel):
         sb = torch.where(aero_on, V * inv_vt, torch.zeros_like(V))
         cb = torch.where(aero_on, vxz * inv_vt, torch.zeros_like(vxz))
         return sa, ca, sb, cb
+
+
+class HybridModelNewNoForward(HybridModelNew):
+    """HYBRID_NEW variant with the forward/head motor physically disabled."""
+
+    def update(self, action):
+        action = torch.clamp(action, -1, 1).clone()
+        action[:, 0] = -1.0
+        super().update(action)
+        self.u[:, 0] = 0.0
+        self.filtered_action[:, 0] = -1.0

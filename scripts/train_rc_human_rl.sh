@@ -8,7 +8,7 @@
 #   envs/configs/rc_human.yaml
 #
 # Key settings:
-#   - 30 s episode: max_steps/buffer-size = 1500 at dt=0.02
+#   - 30 s episode: max_steps/buffer-size = 2000 at dt=0.02
 #   - 1024 rollout envs
 #   - HYBRID_NEW model so env Dryden wind is applied
 #   - GRU is enabled by default in config.py. Do not pass
@@ -41,7 +41,7 @@ echo "env is ${env}, scenario is ${scenario}, model is ${model}, algo is ${algo}
     --env-name ${env} --algorithm-name ${algo} --scenario-name ${scenario} --model-name ${model} --experiment-name ${exp} \
     --seed ${seed} --device ${device} --n-training-threads 1 --n-rollout-threads 1024 --cuda \
     --log-interval 1 --save-interval 10 \
-    --num-mini-batch 8 --buffer-size 1500 --num-env-steps 1.5e9 \
+    --num-mini-batch 8 --buffer-size 2000 --num-env-steps 1.5e9 \
     --lr 3e-4 --gamma 0.99 --gae-lambda 0.95 --ppo-epoch 12 --clip-param 0.2 --max-grad-norm 2 --entropy-coef 2e-3 \
     --hidden-size "128 128" --act-hidden-size "128 128" --activation-id 1 --gain 0.01 \
     --recurrent-hidden-size 128 --recurrent-hidden-layers 1 --data-chunk-length 8 \

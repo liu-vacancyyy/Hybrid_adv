@@ -20,6 +20,18 @@ class RCHumanTrackingError(BaseTerminationCondition):
         self.axis_vel_error_limit = float(
             getattr(config, 'rc_human_bad_done_axis_vel_error', 0.5)
         )
+        self.vx_error_min = float(
+            getattr(config, 'rc_human_bad_done_vx_error_min', self.axis_vel_error_limit)
+        )
+        self.vx_error_frac = float(
+            getattr(config, 'rc_human_bad_done_vx_error_frac', 0.0)
+        )
+        self.vy_error_limit = float(
+            getattr(config, 'rc_human_bad_done_vy_error', self.axis_vel_error_limit)
+        )
+        self.vz_error_limit = float(
+            getattr(config, 'rc_human_bad_done_vz_error', self.axis_vel_error_limit)
+        )
         self.grace_steps = int(getattr(config, 'rc_human_bad_done_grace_steps', 50))
         self.persist_steps = max(
             1, int(getattr(config, 'rc_human_bad_done_persist_steps', 10))
@@ -47,23 +59,35 @@ class RCHumanTrackingError(BaseTerminationCondition):
         _roll, _pitch, heading = env.model.get_posture()
         vx_n, vy_e = env.model.get_ground_speed()
         vz = env.model.get_climb_rate()
-        local_vx, local_vy = task.ground_to_local_velocity(vx_n, vy_e, heading)
 
         yaw_error = torch.abs(wrap_PI(heading - task.target_heading))
-        axis_vel_error = torch.max(
-            torch.stack((
-                torch.abs(local_vx - task.target_vx),
-                torch.abs(local_vy - task.target_vy),
-                torch.abs(vz - task.target_vz),
-            ), dim=0),
-            dim=0,
-        ).values
+        local_vx_error, local_vy_error = task.ground_to_local_velocity(
+            vx_n - task.target_vn, vy_e - task.target_ve, heading
+        )
+        vx_error = torch.abs(local_vx_error)
+        vy_error = torch.abs(local_vy_error)
+        vz_error = torch.abs(vz - task.target_vz)
+        vx_limit = torch.maximum(
+            torch.full_like(vx_error, self.vx_error_min),
+            torch.abs(task.target_vx) * self.vx_error_frac,
+        )
 
         active = env.step_count > self.grace_steps
-        violation = active & (
-            (yaw_error > self.yaw_error_limit)
-            | (axis_vel_error > self.axis_vel_error_limit)
+        transient_left = getattr(task, 'command_transient_left', None)
+        if transient_left is None:
+            velocity_tracking_active = torch.ones_like(active, dtype=torch.bool)
+        else:
+            velocity_tracking_active = transient_left <= 0
+        mode5_state = getattr(task, 'mode5_release_state', None)
+        if mode5_state is not None:
+            velocity_tracking_active = velocity_tracking_active & (mode5_state != 1)
+        yaw_violation = yaw_error > self.yaw_error_limit
+        velocity_violation = velocity_tracking_active & (
+            (vx_error > vx_limit)
+            | (vy_error > self.vy_error_limit)
+            | (vz_error > self.vz_error_limit)
         )
+        violation = active & (yaw_violation | velocity_violation)
         self.violation_count = torch.where(
             violation,
             self.violation_count + 1,

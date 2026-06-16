@@ -8,22 +8,55 @@ enable_dryden_turbulence: true
 dryden_randomize: true
 dryden_domain_randomization: true
 dryden_sigma_curriculum_enable: true
-dryden_sigma_ref: 0.6
-dryden_sigma_ref_min: 0.25
-dryden_sigma_ref_max: 0.9
+dryden_sigma_ref: 1.0
+dryden_sigma_ref_min: 0.4
+dryden_sigma_ref_max: 1.5
 dryden_sigma_scale_min: 0.8
 dryden_sigma_scale_max: 1.2
 dryden_length_scale_min: 0.8
 dryden_length_scale_max: 1.2
+dryden_length_longitudinal_m: 25.0
+dryden_length_lateral_m: 25.0
+dryden_length_vertical_m: 8.0
+dryden_external_tau_scale: 0.08
+dryden_external_tau_min: 0.20
+dryden_external_tau_max: 1.20
 dryden_mean_wind_curriculum_enable: true
 dryden_mean_wind_scale_min: 0.2
 dryden_mean_wind_scale_max: 1.0
-dryden_mean_wind_north_min: -1.0
-dryden_mean_wind_north_max: 1.0
-dryden_mean_wind_east_min: -1.0
-dryden_mean_wind_east_max: 1.0
-dryden_mean_wind_down_min: -0.15
-dryden_mean_wind_down_max: 0.15
+dryden_mean_wind_north_min: -2.0
+dryden_mean_wind_north_max: 2.0
+dryden_mean_wind_east_min: -2.0
+dryden_mean_wind_east_max: 2.0
+dryden_mean_wind_down_min: -0.4
+dryden_mean_wind_down_max: 0.4
+enable_dryden_angular_turbulence: true
+dryden_pqr_sigma_ref: 0.15
+dryden_pqr_sigma_scale_min: 0.8
+dryden_pqr_sigma_scale_max: 1.2
+dryden_pqr_tau_p: 0.8
+dryden_pqr_tau_q: 0.8
+dryden_pqr_tau_r: 1.0
+dryden_pqr_attack_p_max: 0.6
+dryden_pqr_attack_q_max: 0.6
+dryden_pqr_attack_r_max: 0.5
+
+# Equivalent low-speed wind loading. These are not high-fidelity aerodynamic
+# derivatives; they make Dryden wind act on the multirotor-hover airframe as
+# body drag plus moment about an offset center of pressure.
+wind_drag_enable: true
+wind_body_cda_x: 0.10
+wind_body_cda_y: 0.18
+wind_body_cda_z: 0.14
+wind_cp_x: 0.02
+wind_cp_y: 0.0
+wind_cp_z: -0.06
+wind_pqr_torque_enable: true
+wind_pqr_accel_gain_p: 0.8
+wind_pqr_accel_gain_q: 0.8
+wind_pqr_accel_gain_r: 0.6
+wind_force_clip: 25.0
+wind_moment_clip: 5.0
 
 # simulation config
 solver: euler
@@ -57,28 +90,34 @@ action_filter_alpha: 0.25    # filtered = 0.75 * previous_action + 0.25 * curren
 # sensor variables before normalization. get_clean_obs(env) bypasses it.
 enable_sensor_noise: true
 sensor_pos_std:   1.0       # m      altitude channel in rc_human
-sensor_vel_std:   0.05      # m/s    velocity / airspeed observation channels
+sensor_vel_std:   0.02      # m/s    zero-mean velocity / airspeed observation noise
 sensor_att_std:   0.005     # rad    roll / pitch / yaw
 sensor_omega_std: 0.0005    # rad/s  body angular rate
 
-# PX4-like human RC command generator
-# Raw sticks are processed as PX4-style manual inputs. Horizontal stick commands
-# are interpreted in the heading frame and then rotated into local N/E velocity
-# setpoints. The magnitude limits below are still LearningToFly's hover/low-
-# speed command range: U(-1, 1) m/s per velocity channel.
-rc_human_vx_limit: 1.0
+# PX4 VTOL-MC human RC command generator.
+# VTOL MC mode uses the multicopter manual task path. Raw horizontal sticks pass
+# through MAN_DEADZONE/expo, PX4's unit-circle stick limiting, forward/back/side
+# velocity scaling, and heading-frame rotation into local N/E velocity setpoints.
+# The magnitude limits below are still LearningToFly's hover/low-speed command
+# range. Forward velocity is asymmetric: reverse is limited to -1 m/s, while
+# forward command can reach 5 m/s.
+rc_human_vx_min: -1.0
+rc_human_vx_max: 5.0
+rc_human_vx_limit: 5.0
 rc_human_vy_limit: 1.0
 rc_human_vz_limit: 1.0
 rc_human_yaw_rate_limit: 0.6
 rc_human_deadzone: 0.10
 rc_human_expo: 0.60
-rc_human_velocity_tau: 0.55
-rc_human_yaw_tau: 0.75
-rc_human_stick_slew_rate: 2.0
-rc_human_stick_noise_std: 0.015
+rc_human_velocity_tau: 0.0
+rc_human_yaw_tau: 0.08
+rc_human_stick_noise_std: 0.0
 rc_human_dwell_min_steps: 75
 rc_human_dwell_max_steps: 300
 rc_human_curriculum_enable: true
+rc_human_vx_forward_curriculum_enable: true
+rc_human_vx_forward_easy_max: 1.0
+rc_human_vx_forward_medium_max: 3.0
 rc_human_mode_order: "0 1 2 5 3 4"
 rc_human_levels_per_mode: 20
 rc_human_max_mode_slots: 6
@@ -89,12 +128,29 @@ rc_human_mix_random_replay: 0.10
 rc_human_easy_stick: 0.25
 rc_human_medium_stick: 0.65
 rc_human_hard_stick: 1.0
-rc_human_success_vel_error: 0.50
+rc_human_command_transient_grace_steps: 60   # ignore velocity tracking bad_done for 1.2 s after ordinary command jumps
+rc_human_command_transient_threshold: 0.20    # raw-stick delta that starts the transient grace window
+rc_human_mode3_reverse_axes: 1               # reversal flips one dominant/random axis; mode 4 covers multi-axis commands
+rc_human_command_rate_limit_frac: 0.05       # max raw-stick change per 20 ms step; 0.05 means 0->1 in 0.4 s, -1->1 in 0.8 s
+rc_human_command_reversal_threshold: 0.10    # sign-flip threshold on raw stick channels
+rc_human_large_command_transient_delta: 1.0 # large command jump threshold across any mode
+rc_human_large_command_transient_grace_steps: 100 # ignore velocity tracking bad_done for 2.0 s after large jumps
+rc_human_mode5_hold_min_steps: 75             # hold forward command for at least 1.5 s before release
+rc_human_mode5_hold_max_steps: 250            # force release after 5.0 s even if target speed is not reached
+rc_human_mode5_release_recovery_steps: 150    # keep centered sticks for 3.0 s after release before resampling
+rc_human_mode5_release_speed_error: 0.35      # m/s speed-match threshold for speed-triggered release
+rc_human_mode5_release_target_frac: 0.80      # require command to reach 80% of intended pre-release speed
+rc_human_success_vel_error: 0.75
 rc_human_success_yaw_error: 0.30
 rc_human_success_attitude_error: 0.35
+rc_human_success_ignore_transient: true       # curriculum success metrics skip command-transition steps
 rc_human_tracking_bad_done_enable: true
 rc_human_bad_done_yaw_error_deg: 20.0
 rc_human_bad_done_axis_vel_error: 0.5
+rc_human_bad_done_vx_error_min: 0.75
+rc_human_bad_done_vx_error_frac: 0.25
+rc_human_bad_done_vy_error: 0.5
+rc_human_bad_done_vz_error: 0.5
 rc_human_bad_done_grace_steps: 50       # ignore first 1.0 s after reset
 rc_human_bad_done_persist_steps: 10     # require 0.2 s continuous violation
 rc_human_alt_high: 95.0
@@ -103,13 +159,16 @@ rc_human_alt_low: 5.0
 # reward shaping
 rc_human_w_alive: 0.2
 rc_human_w_vel: 5.0
-rc_human_w_yaw: 2.0
+rc_human_w_yaw: 3.0
 rc_human_w_attitude: 1.8
 rc_human_w_omega: 1.0
-rc_human_w_smooth: 1.5
+rc_human_w_smooth: 0.0       # disabled for LCP training; keep code path for ablations
 rc_human_sig_vel: 0.45
+rc_human_sig_vx: 0.90
+rc_human_sig_vy: 0.45
+rc_human_sig_vz: 0.45
 rc_human_sig_yaw: 0.12
 rc_human_sig_attitude: 0.12
 rc_human_sig_omega: 1.0
-rc_human_sig_smooth: 0.8
+rc_human_sig_smooth: 0.7     # unused when rc_human_w_smooth is 0
 rc_human_bad_done_penalty: 200.0

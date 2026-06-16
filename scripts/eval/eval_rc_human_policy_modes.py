@@ -132,8 +132,9 @@ def record_step(env, reward, action, prev_action):
     vx_n, vy_e = env.model.get_ground_speed()
     vz = env.model.get_climb_rate()
     local_vx, local_vy = env.task.ground_to_local_velocity(vx_n, vy_e, heading)
-    err_vx = local_vx - env.task.target_vx
-    err_vy = local_vy - env.task.target_vy
+    err_vx, err_vy = env.task.ground_to_local_velocity(
+        vx_n - env.task.target_vn, vy_e - env.task.target_ve, heading
+    )
     err_vz = vz - env.task.target_vz
     yaw_err = torch.atan2(
         torch.sin(heading - env.task.target_heading),

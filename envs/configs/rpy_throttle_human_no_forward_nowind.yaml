@@ -1,0 +1,162 @@
+# Roll/pitch/yaw-rate/collective-throttle human RC task, no wind.
+# Use model HYBRID_NEW_NO_FORWARD or --freeze-head-motor to keep motor 0 at 0N.
+task_name: rpy_throttle_human
+
+# atmosphere / observation noise
+airspeed: 0
+noise_scale: 0.01
+enable_wind: false
+enable_dryden_turbulence: false
+dryden_randomize: false
+dryden_domain_randomization: false
+dryden_sigma_curriculum_enable: false
+dryden_sigma_ref: 0.0
+dryden_sigma_ref_min: 0.0
+dryden_sigma_ref_max: 0.0
+dryden_sigma_scale_min: 0.0
+dryden_sigma_scale_max: 0.0
+dryden_mean_wind_curriculum_enable: false
+dryden_mean_wind_scale_min: 0.0
+dryden_mean_wind_scale_max: 0.0
+dryden_mean_wind_north_min: 0.0
+dryden_mean_wind_north_max: 0.0
+dryden_mean_wind_east_min: 0.0
+dryden_mean_wind_east_max: 0.0
+dryden_mean_wind_down_min: 0.0
+dryden_mean_wind_down_max: 0.0
+enable_dryden_angular_turbulence: false
+dryden_pqr_sigma_ref: 0.0
+dryden_pqr_sigma_scale_min: 0.0
+dryden_pqr_sigma_scale_max: 0.0
+wind_drag_enable: false
+wind_pqr_torque_enable: false
+wind_north: 0.0
+wind_east: 0.0
+wind_down: 0.0
+wind_body_cda_x: 0.0
+wind_body_cda_y: 0.0
+wind_body_cda_z: 0.0
+wind_cp_x: 0.0
+wind_cp_y: 0.0
+wind_cp_z: 0.0
+wind_pqr_accel_gain_p: 0.0
+wind_pqr_accel_gain_q: 0.0
+wind_pqr_accel_gain_r: 0.0
+wind_force_clip: 0.0
+wind_moment_clip: 0.0
+
+# simulation config
+solver: euler
+dt: 0.02
+max_steps: 1500
+num_agents: 1
+num_states: 12
+num_controls: 5
+num_actions: 5
+num_observation: 32
+
+# aircraft / safety config
+altitude_limit: 0.2
+acceleration_limit: 12.0
+max_velocity: 10
+max_y_velocity: 2
+min_alpha: -10
+max_alpha: 20
+min_beta: -15
+max_beta: 15
+max_omega: 4
+max_pitch: 25
+max_roll: 30
+color: Red
+model: hybrid
+termination_verbose: false
+enable_action_filter: true
+action_filter_alpha: 0.25
+
+# Sensor noise.
+enable_sensor_noise: true
+sensor_pos_std: 1.0
+sensor_vel_std: 0.02
+sensor_att_std: 0.005
+sensor_omega_std: 0.0005
+
+# RPY + throttle human command generator.
+# Mode layout, 20 levels each:
+#   mode0: neutral hover trim
+#   mode1: roll/pitch only
+#   mode2: collective throttle only
+#   mode3: yaw-rate only
+#   mode4: two-axis combinations
+#   mode5: strong three/four-axis combinations
+rpy_throttle_roll_limit_deg: 10.0
+rpy_throttle_pitch_limit_deg: 10.0
+rpy_throttle_yaw_rate_limit: 0.6
+rpy_throttle_delta_easy: 0.08
+rpy_throttle_delta_medium: 0.15
+rpy_throttle_delta_hard: 0.25
+rpy_throttle_min_collective_frac: 0.75
+rpy_throttle_max_collective_frac: 1.25
+rpy_throttle_mode_order: "0 1 2 3 4 5"
+rpy_throttle_levels_per_mode: 20
+rpy_throttle_max_mode_slots: 6
+rpy_throttle_easy_stick: 0.20
+rpy_throttle_medium_stick: 0.55
+rpy_throttle_hard_stick: 1.0
+rpy_throttle_mode3_reverse_axes: 1
+rpy_throttle_success_attitude_error: 0.05236
+rpy_throttle_success_yaw_rate_error: 0.12
+rpy_throttle_success_throttle_error: 0.08
+rpy_throttle_success_overshoot: 0.20
+
+# Shared command-timing settings reused by RCHumanTask's generator.
+rc_human_yaw_rate_limit: 0.6
+rc_human_deadzone: 0.10
+rc_human_expo: 0.60
+rc_human_velocity_tau: 0.0
+rc_human_yaw_tau: 0.08
+rc_human_stick_noise_std: 0.0
+rc_human_dwell_min_steps: 75
+rc_human_dwell_max_steps: 300
+rc_human_curriculum_enable: true
+rc_human_mode_order: "0 1 2 3 4 5"
+rc_human_levels_per_mode: 20
+rc_human_max_mode_slots: 6
+rc_human_mix_current: 0.50
+rc_human_mix_easy_replay: 0.20
+rc_human_mix_medium_replay: 0.20
+rc_human_mix_random_replay: 0.10
+rc_human_easy_stick: 0.20
+rc_human_medium_stick: 0.55
+rc_human_hard_stick: 1.0
+rc_human_command_transient_grace_steps: 60
+rc_human_command_transient_threshold: 0.20
+rc_human_command_rate_limit_frac: 0.05
+rc_human_command_reversal_threshold: 0.10
+rc_human_large_command_transient_delta: 1.0
+rc_human_large_command_transient_grace_steps: 100
+rc_human_mode5_hold_min_steps: 75
+rc_human_mode5_hold_max_steps: 250
+rc_human_mode5_release_recovery_steps: 150
+rc_human_success_ignore_transient: true
+rc_human_alt_high: 95.0
+rc_human_alt_low: 5.0
+
+# reward shaping
+rpy_throttle_w_alive: 0.2
+rpy_throttle_w_attitude: 5.0
+rpy_throttle_w_yaw_rate: 2.0
+rpy_throttle_w_throttle: 2.0
+rpy_throttle_w_omega: 1.0
+rpy_throttle_w_smooth: 0.4
+rpy_throttle_w_velocity: 0.0
+rpy_throttle_w_overshoot: 1.0
+rpy_throttle_w_moving_away: 0.3
+rpy_throttle_sig_roll: 0.045
+rpy_throttle_sig_pitch: 0.045
+rpy_throttle_sig_yaw_rate: 0.12
+rpy_throttle_sig_throttle: 0.06
+rpy_throttle_sig_omega: 0.8
+rpy_throttle_sig_smooth: 0.8
+rpy_throttle_sig_velocity: 2.5
+rpy_throttle_sig_overshoot: 0.35
+rpy_throttle_bad_done_penalty: 200.0

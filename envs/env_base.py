@@ -109,9 +109,16 @@ class BaseEnv(gym.Env):
             gust_ned = self.wind_disturbance.step()
         else:
             gust_ned = self.wind_disturbance.gust_ned
-        self.model.set_wind_gust_ned(
-            gust_ned[:, 0], gust_ned[:, 1], gust_ned[:, 2]
-        )
+        gust_pqr = getattr(self.wind_disturbance, 'gust_pqr_body', None)
+        if gust_pqr is None:
+            self.model.set_wind_gust_ned(
+                gust_ned[:, 0], gust_ned[:, 1], gust_ned[:, 2]
+            )
+        else:
+            self.model.set_wind_gust_ned(
+                gust_ned[:, 0], gust_ned[:, 1], gust_ned[:, 2],
+                pqr_body=gust_pqr,
+            )
 
     def reset(self):
         done = self.is_done.bool()
