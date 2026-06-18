@@ -207,6 +207,19 @@ def _get_ppo_config(parser: argparse.ArgumentParser):
                        help="By default, use max norm of gradients. If set, do not use.")
     group.add_argument("--max-grad-norm", type=float, default=2,
                        help='max norm of gradients (default: 2)')
+    group.add_argument("--target-kl", type=float, default=0.0,
+                       help='Skip PPO minibatch updates when approximate KL exceeds this value. '
+                            '0 disables the guard.')
+    group.add_argument("--max-log-ratio", type=float, default=20.0,
+                       help='Clamp PPO log probability ratio before exp to avoid inf ratios.')
+    group.add_argument("--use-safety-aux", action='store_true', default=False,
+                       help='Enable auxiliary actor-head prediction of bad_done within a future horizon.')
+    group.add_argument("--safety-aux-horizon", type=int, default=25,
+                       help='Future transition horizon for safety auxiliary bad_done labels.')
+    group.add_argument("--safety-aux-loss-coef", type=float, default=0.1,
+                       help='Loss coefficient for the safety auxiliary BCE loss.')
+    group.add_argument("--safety-aux-pos-weight", type=float, default=5.0,
+                       help='Positive-class weight for safety auxiliary BCE loss.')
     return parser
 
 def _get_adv_config(parser: argparse.ArgumentParser):

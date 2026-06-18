@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PPO-GRU training for the RPY + throttle human-command task, no wind, with
+# PPO-GRU training for the RPY + throttle one-shot reach task, no wind, with
 # the forward/head motor physically disabled.
 #
 # Task target:
-#   roll, pitch, yaw_rate, collective throttle
+#   one episode: initial attitude -> commanded roll/pitch/yaw/throttle target
 #
-# Policy action:
-#   five motor action dimensions, but motor 0 is forced to zero thrust.
+# Curriculum:
+#   10 modes x 10 levels.  Modes 0-4 start from hover; modes 5-9 start from
+#   the online pose pool and reuse the difficulty of mode(x-5).
 #
 # Run:
 #   cd /home/a/demo/Hybrid_adv
-#   bash scripts/train_rpy_throttle_human_no_forward_rl_nowind_from_scratch.sh
+#   bash scripts/train_rpy_throttle_reach_no_forward_nowind_from_scratch.sh
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -24,21 +25,17 @@ DEVICE="${DEVICE:-cuda:0}"
 SEED="${SEED:-7}"
 
 ENV_NAME="Control"
-SCENARIO_NAME="rpy_throttle_human_no_forward_nowind"
+SCENARIO_NAME="${SCENARIO_NAME:-rpy_throttle_reach_no_forward_nowind}"
 MODEL_NAME="HYBRID_NEW_NO_FORWARD"
 ALGO_NAME="ppo"
 
-export RPY_THROTTLE_MODE_ORDER="${RPY_THROTTLE_MODE_ORDER:-0 1 2 3 4 5}"
-export RPY_THROTTLE_MAX_MODE_SLOTS="${RPY_THROTTLE_MAX_MODE_SLOTS:-6}"
-export RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC="${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC:-0.05}"
-export RPY_THROTTLE_REWARD_VARIANT="${RPY_THROTTLE_REWARD_VARIANT:-balanced}"
+export RPY_THROTTLE_REACH_MAX_MODE_SLOTS="${RPY_THROTTLE_REACH_MAX_MODE_SLOTS:-10}"
 
-RATE_TAG=$(printf '%s' "${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC}" | tr -c '0-9A-Za-z' '_')
-REWARD_TAG=$(printf '%s' "${RPY_THROTTLE_REWARD_VARIANT}" | tr -c '0-9A-Za-z' '_')
-EXP="${RPY_THROTTLE_EXP_NAME:-rpy_throttle_human_no_forward_nowind_${REWARD_TAG}_rate${RATE_TAG}_from_scratch_modes012345}"
+SCENARIO_TAG=$(printf '%s' "${SCENARIO_NAME}" | tr -c '0-9A-Za-z' '_')
+EXP="${RPY_THROTTLE_REACH_EXP_NAME:-${SCENARIO_TAG}_from_scratch_modes0123456789}"
 
 N_ROLLOUT_THREADS="${N_ROLLOUT_THREADS:-2048}"
-BUFFER_SIZE="${BUFFER_SIZE:-1500}"
+BUFFER_SIZE="${BUFFER_SIZE:-1000}"
 NUM_ENV_STEPS="${NUM_ENV_STEPS:-2.5e9}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 LOG_INTERVAL="${LOG_INTERVAL:-1}"
@@ -53,6 +50,10 @@ USE_CLIPPED_VALUE_LOSS="${USE_CLIPPED_VALUE_LOSS:-1}"
 DATA_CHUNK_LENGTH="${DATA_CHUNK_LENGTH:-8}"
 TARGET_KL="${TARGET_KL:-0.02}"
 MAX_LOG_RATIO="${MAX_LOG_RATIO:-10.0}"
+USE_SAFETY_AUX="${USE_SAFETY_AUX:-1}"
+SAFETY_AUX_HORIZON="${SAFETY_AUX_HORIZON:-25}"
+SAFETY_AUX_LOSS_COEF="${SAFETY_AUX_LOSS_COEF:-0.10}"
+SAFETY_AUX_POS_WEIGHT="${SAFETY_AUX_POS_WEIGHT:-5.0}"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -90,6 +91,25 @@ case "${USE_CLIPPED_VALUE_LOSS}" in
         ;;
 esac
 
+SAFETY_AUX_ARGS=()
+case "${USE_SAFETY_AUX}" in
+    1|true|TRUE|yes|YES|on|ON)
+        SAFETY_AUX_ARGS=(
+            --use-safety-aux
+            --safety-aux-horizon "${SAFETY_AUX_HORIZON}"
+            --safety-aux-loss-coef "${SAFETY_AUX_LOSS_COEF}"
+            --safety-aux-pos-weight "${SAFETY_AUX_POS_WEIGHT}"
+        )
+        ;;
+    0|false|FALSE|no|NO|off|OFF)
+        SAFETY_AUX_ARGS=()
+        ;;
+    *)
+        echo "USE_SAFETY_AUX must be 0/1 or true/false, got: ${USE_SAFETY_AUX}" >&2
+        exit 2
+        ;;
+esac
+
 TRAIN_CMD=(
     "${PYTHON_BIN}" "${REPO_ROOT}/scripts/train/train_F16sim.py"
     --env-name "${ENV_NAME}"
@@ -117,6 +137,7 @@ TRAIN_CMD=(
     --max-grad-norm "${MAX_GRAD_NORM}"
     --target-kl "${TARGET_KL}"
     --max-log-ratio "${MAX_LOG_RATIO}"
+    "${SAFETY_AUX_ARGS[@]}"
     --entropy-coef "${ENTROPY_COEF}"
     --hidden-size "128 128"
     --act-hidden-size "128 128"
@@ -128,19 +149,17 @@ TRAIN_CMD=(
     "$@"
 )
 
-echo "rpy_throttle human no-forward no-wind from-scratch training"
+echo "rpy_throttle reach no-forward no-wind from-scratch training"
 echo "  experiment: ${EXP}"
 echo "  env/model: ${ENV_NAME}/${SCENARIO_NAME}/${MODEL_NAME}"
 echo "  motor0: forced to 0N by HYBRID_NEW_NO_FORWARD model"
 echo "  seed/device: ${SEED}/${DEVICE}"
-echo "  reward_variant: ${RPY_THROTTLE_REWARD_VARIANT}"
-echo "  mode_order: ${RPY_THROTTLE_MODE_ORDER}"
-echo "  max_mode_slots: ${RPY_THROTTLE_MAX_MODE_SLOTS}"
-echo "  command_rate_limit_frac: ${RPY_THROTTLE_COMMAND_RATE_LIMIT_FRAC}"
+echo "  max_mode_slots: ${RPY_THROTTLE_REACH_MAX_MODE_SLOTS}"
 echo "  rollout_threads=${N_ROLLOUT_THREADS}, buffer_size=${BUFFER_SIZE}, num_env_steps=${NUM_ENV_STEPS}"
 echo "  lr=${LR}, value_loss_coef=${VALUE_LOSS_COEF}, clipped_value_loss=${USE_CLIPPED_VALUE_LOSS}"
 echo "  ppo_epoch=${PPO_EPOCH}, num_mini_batch=${NUM_MINI_BATCH}, entropy_coef=${ENTROPY_COEF}"
 echo "  max_grad_norm=${MAX_GRAD_NORM}, target_kl=${TARGET_KL}, max_log_ratio=${MAX_LOG_RATIO}"
+echo "  safety_aux=${USE_SAFETY_AUX}, horizon=${SAFETY_AUX_HORIZON}, loss_coef=${SAFETY_AUX_LOSS_COEF}, pos_weight=${SAFETY_AUX_POS_WEIGHT}"
 
 case "${DRY_RUN:-0}" in
     1|true|TRUE|yes|YES|on|ON)

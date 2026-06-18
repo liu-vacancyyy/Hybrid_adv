@@ -215,22 +215,53 @@ class RPYThrottleReward(BaseRewardFunction):
             + torch.relu(yaw_rate_error * yaw_rate)
         )
 
+        reward_alive = torch.full_like(r_attitude, self.w_alive)
+        reward_attitude = self.w_attitude * r_attitude
+        reward_yaw_rate = self.w_yaw_rate * r_yaw_rate
+        reward_throttle = self.w_throttle * r_throttle
+        reward_omega = self.w_omega * r_omega
+        reward_velocity = self.w_velocity * r_velocity
+        reward_overshoot = self.w_overshoot * r_overshoot
+        reward_moving_away = -self.w_moving_away * moving_away
+
         reward = (
-            self.w_alive
-            + self.w_attitude * r_attitude
-            + self.w_yaw_rate * r_yaw_rate
-            + self.w_throttle * r_throttle
-            + self.w_omega * r_omega
-            + self.w_velocity * r_velocity
-            + self.w_overshoot * r_overshoot
-            - self.w_moving_away * moving_away
+            reward_alive
+            + reward_attitude
+            + reward_yaw_rate
+            + reward_throttle
+            + reward_omega
+            + reward_velocity
+            + reward_overshoot
+            + reward_moving_away
         )
 
         if self.w_smooth > 0.0:
             delta_u = env.model.u - env.model.recent_u
             delta_u_sq = torch.sum(delta_u * delta_u, dim=1)
             r_smooth = torch.exp(-delta_u_sq / max(self.sig_smooth ** 2, 1e-6))
-            reward = reward + self.w_smooth * r_smooth
+            reward_smooth = self.w_smooth * r_smooth
+            reward = reward + reward_smooth
+        else:
+            reward_smooth = torch.zeros_like(reward)
+
+        task.last_reward_terms = {
+            'reward/total_mean': reward.detach().mean(),
+            'reward/alive_mean': reward_alive.detach().mean(),
+            'reward/attitude_mean': reward_attitude.detach().mean(),
+            'reward/yaw_rate_mean': reward_yaw_rate.detach().mean(),
+            'reward/throttle_mean': reward_throttle.detach().mean(),
+            'reward/omega_mean': reward_omega.detach().mean(),
+            'reward/smooth_mean': reward_smooth.detach().mean(),
+            'reward/velocity_mean': reward_velocity.detach().mean(),
+            'reward/overshoot_mean': reward_overshoot.detach().mean(),
+            'reward/moving_away_mean': reward_moving_away.detach().mean(),
+            'reward/raw_attitude_score_mean': r_attitude.detach().mean(),
+            'reward/raw_yaw_rate_score_mean': r_yaw_rate.detach().mean(),
+            'reward/raw_throttle_score_mean': r_throttle.detach().mean(),
+            'reward/raw_omega_score_mean': r_omega.detach().mean(),
+            'reward/raw_smooth_score_mean': r_smooth.detach().mean() if self.w_smooth > 0.0 else torch.zeros((), device=env.device),
+            'reward/raw_overshoot_score_mean': r_overshoot.detach().mean(),
+        }
 
         return reward
 

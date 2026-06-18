@@ -2,7 +2,7 @@
 # Diagnose whether the current shell can access NVIDIA CUDA devices.
 set -euo pipefail
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 echo "== kernel =="
 uname -a
@@ -47,4 +47,3 @@ if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
         print(f"cuda:{i}", torch.cuda.get_device_name(i))
 PY
-

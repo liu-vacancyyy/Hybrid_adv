@@ -7,7 +7,7 @@ set -eu
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ROOT_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
 RUN_DIR="${RUN_DIR:-${ROOT_DIR}/scripts/runs/2026-05-28_18-37-31_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_modes012534}"
 EPISODE="${EPISODE:-600}"

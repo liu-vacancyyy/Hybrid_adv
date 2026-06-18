@@ -13,6 +13,7 @@ from tasks.tracking_task import TrackingTask
 from tasks.rc_task import RCTask
 from tasks.rc_human_task import RCHumanTask
 from tasks.rpy_throttle_human_task import RPYThrottleHumanTask
+from tasks.rpy_throttle_reach_task import RPYThrottleReachTask
 from tasks.simulink_task import SimulinkTask
 from tasks.hover_task import HoverTask
 from tasks.circle_task import CircleTask
@@ -55,6 +56,8 @@ class ControlEnv(BaseEnv):
             self.task = RCHumanTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'rpy_throttle_human':
             self.task = RPYThrottleHumanTask(self.config, self.n, self.device, random_seed)
+        elif task_name == 'rpy_throttle_reach':
+            self.task = RPYThrottleReachTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'simulink':
             self.task = SimulinkTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'hover':

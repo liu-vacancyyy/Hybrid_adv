@@ -6,7 +6,7 @@
 #   bash scripts/tools/fix_nvidia_device_nodes.sh
 set -euo pipefail
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 in_sandbox=0
 if tr '\0' ' ' < /proc/1/cmdline 2>/dev/null | grep -qE 'bwrap|codex-linux-sandbox'; then

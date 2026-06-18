@@ -48,6 +48,9 @@ class PPOPolicy:
         values, _ = self.critic(obs, rnn_states_critic, masks)
         return values, action_log_probs, dist_entropy
 
+    def predict_safety(self, obs, rnn_states_actor, masks):
+        return self.actor.predict_safety(obs, rnn_states_actor, masks)
+
     def act(self, obs, rnn_states_actor, masks, deterministic=False):
         """
         Returns:

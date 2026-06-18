@@ -11,7 +11,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/../.." && pwd)
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 RUN_DIR="${RUN_DIR:-scripts/runs/2026-06-15_19-30-28_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_px4_rate0_05_from_scratch_modes012534}"
 EPISODE="${EPISODE:-620}"
 CKPT_PATH="${CKPT_PATH:-${RUN_DIR}/episode_${EPISODE}/actor_latest.ckpt}"

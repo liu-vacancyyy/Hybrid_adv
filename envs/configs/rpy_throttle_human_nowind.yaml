@@ -47,7 +47,7 @@ wind_moment_clip: 0.0
 # simulation config
 solver: euler
 dt: 0.02
-max_steps: 1500
+max_steps: 500
 num_agents: 1
 num_states: 12
 num_controls: 5
@@ -55,15 +55,18 @@ num_actions: 5
 num_observation: 32
 
 # aircraft / safety config
-altitude_limit: 0.2
+altitude_limit: 0.5
 acceleration_limit: 12.0
+overload_bad_done_persist_steps: 3
 max_velocity: 10
 max_y_velocity: 2
+max_body_y_velocity: 2.0
 min_alpha: -10
 max_alpha: 20
 min_beta: -15
 max_beta: 15
 max_omega: 4
+max_omega_norm: 12.566370614359172
 max_pitch: 25
 max_roll: 30
 color: Red
@@ -106,6 +109,21 @@ rpy_throttle_success_attitude_error: 0.05236   # 3 deg
 rpy_throttle_success_yaw_rate_error: 0.12
 rpy_throttle_success_throttle_error: 0.08
 rpy_throttle_success_overshoot: 0.20
+
+# Safety command override. When the aircraft approaches the bad_done envelope,
+# pause human/random sticks and command level hover until the state is stable
+# again. This changes targets, not policy actions.
+rpy_throttle_safety_override_enable: true
+rpy_throttle_safety_speed_enter: 8.0
+rpy_throttle_safety_speed_exit: 6.5
+rpy_throttle_safety_altitude_enter: 1.5
+rpy_throttle_safety_altitude_exit: 3.0
+rpy_throttle_safety_angle_enter_deg: 18.0
+rpy_throttle_safety_angle_exit_deg: 10.0
+rpy_throttle_safety_omega_enter: 3.0
+rpy_throttle_safety_omega_exit: 1.5
+rpy_throttle_safety_min_hold_steps: 50
+rpy_throttle_safety_recover_steps: 50
 
 # Shared command-timing settings reused by RCHumanTask's generator.
 rc_human_yaw_rate_limit: 0.6

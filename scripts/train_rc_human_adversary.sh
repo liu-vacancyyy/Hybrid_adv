@@ -22,7 +22,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
 VICTIM_CKPT="${VICTIM_CKPT:-/home/a/demo/Hybrid_adv/scripts/runs/2026-06-03_15-49-07_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_modes012534_to_ep650_20260603_154906/episode_650/actor_latest.ckpt}"
 EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_cmd_obs_dryden_wind_from_ep650}"

@@ -43,6 +43,8 @@ class ReplayBuffer(Buffer):
         self.use_proper_time_limits = args.use_proper_time_limits
         self.use_gae = args.use_gae
         self.gae_lambda = args.gae_lambda
+        self.use_safety_aux = bool(getattr(args, 'use_safety_aux', False))
+        self.safety_aux_horizon = max(1, int(getattr(args, 'safety_aux_horizon', 50)))
         # rnn config
         self.recurrent_hidden_size = args.recurrent_hidden_size
         self.recurrent_hidden_layers = args.recurrent_hidden_layers
@@ -68,6 +70,8 @@ class ReplayBuffer(Buffer):
         self.rnn_states_actor = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents,
                                           self.recurrent_hidden_layers, self.recurrent_hidden_size), dtype=np.float32)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
+        self.safety_targets = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
+        self.safety_valid = np.zeros_like(self.safety_targets, dtype=np.float32)
 
         self.step = 0
 
@@ -135,6 +139,8 @@ class ReplayBuffer(Buffer):
         self.returns = np.zeros_like(self.returns, dtype=np.float32)
         self.rnn_states_actor = np.zeros_like(self.rnn_states_critic)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
+        self.safety_targets = np.zeros_like(self.safety_targets, dtype=np.float32)
+        self.safety_valid = np.zeros_like(self.safety_valid, dtype=np.float32)
 
     def compute_returns(self, next_value: np.ndarray):
         """
@@ -171,6 +177,40 @@ class ReplayBuffer(Buffer):
                 self.returns[-1] = next_value
                 for step in reversed(range(self.rewards.shape[0])):
                     self.returns[step] = self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]
+        if self.use_safety_aux:
+            self.compute_safety_targets()
+
+    def compute_safety_targets(self):
+        """Build labels: 1 if a bad_done occurs within the next H transitions."""
+        bad_event = (self.bad_masks[1:] < 0.5)
+        clean_event = (self.masks[1:] < 0.5)
+        terminal_event = bad_event | clean_event
+        large = self.buffer_size + self.safety_aux_horizon + 1
+
+        future_bad_distance = np.full(
+            (self.n_rollout_threads, self.num_agents, 1), large, dtype=np.int32
+        )
+        future_terminal_distance = np.full_like(future_bad_distance, large)
+        targets = np.zeros_like(self.safety_targets, dtype=np.float32)
+        valid = np.zeros_like(self.safety_valid, dtype=np.float32)
+
+        for step in reversed(range(self.buffer_size)):
+            terminal = terminal_event[step]
+            bad = bad_event[step]
+
+            future_bad_distance = np.where(terminal, large, future_bad_distance)
+            future_bad_distance = np.where(bad, 0, future_bad_distance + 1)
+            targets[step] = (future_bad_distance < self.safety_aux_horizon).astype(np.float32)
+
+            future_terminal_distance = np.where(terminal, 0, future_terminal_distance + 1)
+            enough_buffer = step + self.safety_aux_horizon <= self.buffer_size
+            valid[step] = (
+                enough_buffer
+                | (future_terminal_distance < self.safety_aux_horizon)
+            ).astype(np.float32)
+
+        self.safety_targets = targets
+        self.safety_valid = valid
 
     @staticmethod
     def feed_forward_generator(buffer: Union[Buffer, List[Buffer]], num_mini_batch: int):
@@ -205,6 +245,10 @@ class ReplayBuffer(Buffer):
         value_preds = np.vstack([ReplayBuffer._cast(buf.value_preds[:-1]) for buf in buffer])
         rnn_states_actor = np.vstack([ReplayBuffer._cast(buf.rnn_states_actor[:-1]) for buf in buffer])
         rnn_states_critic = np.vstack([ReplayBuffer._cast(buf.rnn_states_critic[:-1]) for buf in buffer])
+        use_safety_aux = buffer[0].use_safety_aux
+        if use_safety_aux:
+            safety_targets = np.vstack([ReplayBuffer._cast(buf.safety_targets) for buf in buffer])
+            safety_valid = np.vstack([ReplayBuffer._cast(buf.safety_valid) for buf in buffer])
 
         batch_size = obs.shape[0]
         mini_batch_size = batch_size // num_mini_batch
@@ -221,9 +265,16 @@ class ReplayBuffer(Buffer):
             value_preds_batch = value_preds[indices]
             rnn_states_actor_batch = rnn_states_actor[indices]
             rnn_states_critic_batch = rnn_states_critic[indices]
+            if use_safety_aux:
+                safety_targets_batch = safety_targets[indices]
+                safety_valid_batch = safety_valid[indices]
 
-            yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
+                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch, \
+                    safety_targets_batch, safety_valid_batch
+            else:
+                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
 
     @staticmethod
     def recurrent_generator(buffer: Union[Buffer, List[Buffer]], num_mini_batch: int, data_chunk_length: int):
@@ -266,6 +317,10 @@ class ReplayBuffer(Buffer):
         value_preds = np.vstack([ReplayBuffer._cast(buf.value_preds[:-1]) for buf in buffer])
         rnn_states_actor = np.vstack([ReplayBuffer._cast(buf.rnn_states_actor[:-1]) for buf in buffer])
         rnn_states_critic = np.vstack([ReplayBuffer._cast(buf.rnn_states_critic[:-1]) for buf in buffer])
+        use_safety_aux = buffer[0].use_safety_aux
+        if use_safety_aux:
+            safety_targets = np.vstack([ReplayBuffer._cast(buf.safety_targets) for buf in buffer])
+            safety_valid = np.vstack([ReplayBuffer._cast(buf.safety_valid) for buf in buffer])
 
         # Get mini-batch size and shuffle chunk data
         data_chunks = n_rollout_threads * buffer_size // data_chunk_length
@@ -283,6 +338,9 @@ class ReplayBuffer(Buffer):
             value_preds_batch = []
             rnn_states_actor_batch = []
             rnn_states_critic_batch = []
+            if use_safety_aux:
+                safety_targets_batch = []
+                safety_valid_batch = []
 
             for index in indices:
 
@@ -295,6 +353,9 @@ class ReplayBuffer(Buffer):
                 advantages_batch.append(advantages[ind:ind + data_chunk_length])
                 returns_batch.append(returns[ind:ind + data_chunk_length])
                 value_preds_batch.append(value_preds[ind:ind + data_chunk_length])
+                if use_safety_aux:
+                    safety_targets_batch.append(safety_targets[ind:ind + data_chunk_length])
+                    safety_valid_batch.append(safety_valid[ind:ind + data_chunk_length])
                 # size [T+1, N, Dim] => [T, N, Dim] => [N, T, Dim] => [N * T, Dim] => [1, Dim]
                 rnn_states_actor_batch.append(rnn_states_actor[ind])
                 rnn_states_critic_batch.append(rnn_states_critic[ind])
@@ -322,9 +383,19 @@ class ReplayBuffer(Buffer):
             advantages_batch = ReplayBuffer._flatten(L, N, advantages_batch)
             returns_batch = ReplayBuffer._flatten(L, N, returns_batch)
             value_preds_batch = ReplayBuffer._flatten(L, N, value_preds_batch)
+            if use_safety_aux:
+                safety_targets_batch = np.stack(safety_targets_batch, axis=1)
+                safety_valid_batch = np.stack(safety_valid_batch, axis=1)
+                safety_targets_batch = ReplayBuffer._flatten(L, N, safety_targets_batch)
+                safety_valid_batch = ReplayBuffer._flatten(L, N, safety_valid_batch)
 
-            yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
+            if use_safety_aux:
+                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch, \
+                    safety_targets_batch, safety_valid_batch
+            else:
+                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
 
 class AdvReplayBuffer(Buffer):
     @staticmethod

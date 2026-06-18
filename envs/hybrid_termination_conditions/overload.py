@@ -13,7 +13,11 @@ class Overload(BaseTerminationCondition):
 
     def __init__(self, config):
         super().__init__(config)
-        self.acceleration_limit = getattr(config, 'acceleration_limit', 5.0)
+        self.acceleration_limit = float(getattr(config, 'acceleration_limit', 5.0))
+        self.persist_steps = max(1, int(getattr(
+            config, 'overload_bad_done_persist_steps', 1
+        )))
+        self.violation_count = None
 
     def get_termination(self, task, env, info={}):
         """
@@ -26,7 +30,20 @@ class Overload(BaseTerminationCondition):
         Returns:
             (tuple): (bad_done, done, exceed_time_limit, info)
         """
-        bad_done = self._judge_overload(env)
+        violation = self._judge_overload(env)
+        self._ensure_state(env)
+        episode_start = env.step_count <= 1
+        self.violation_count = torch.where(
+            episode_start,
+            torch.zeros_like(self.violation_count),
+            self.violation_count,
+        )
+        self.violation_count = torch.where(
+            violation,
+            self.violation_count + 1,
+            torch.zeros_like(self.violation_count),
+        )
+        bad_done = self.violation_count >= self.persist_steps
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
         if torch.any(bad_done):
@@ -34,6 +51,16 @@ class Overload(BaseTerminationCondition):
             if getattr(self.config, 'termination_verbose', True):
                 print(torch.sum(bad_done), 'acceleration is too high!')
         return bad_done, done, exceed_time_limit, info
+
+    def _ensure_state(self, env):
+        if (
+            self.violation_count is None
+            or self.violation_count.numel() != env.n
+            or self.violation_count.device != env.device
+        ):
+            self.violation_count = torch.zeros(
+                env.n, dtype=torch.long, device=env.device
+            )
 
     def _judge_overload(self, env):
         ax, ay, az = env.model.get_acceleration()

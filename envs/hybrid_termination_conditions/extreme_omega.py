@@ -13,7 +13,10 @@ class ExtremeOmega(BaseTerminationCondition):
 
     def __init__(self, config):
         super().__init__(config)
-        self.max_omega = getattr(config, 'max_omega', 2)
+        self.max_omega = float(getattr(config, 'max_omega', 2))
+        self.max_omega_norm = getattr(config, 'max_omega_norm', None)
+        if self.max_omega_norm is not None:
+            self.max_omega_norm = float(self.max_omega_norm)
 
     def get_termination(self, task, env, info={}):
         """
@@ -26,12 +29,23 @@ class ExtremeOmega(BaseTerminationCondition):
         Returns:
             (tuple): (bad_done, done, exceed_time_limit, info)
         """
-        omega1, omega2, omega3 = env.model.get_euler_angular_velocity()
-        bad_done = (torch.abs(omega1) > self.max_omega) | (torch.abs(omega2) > self.max_omega) | (torch.abs(omega3) > self.max_omega)
+        if self.max_omega_norm is None:
+            omega1, omega2, omega3 = env.model.get_euler_angular_velocity()
+            bad_done = (
+                (torch.abs(omega1) > self.max_omega)
+                | (torch.abs(omega2) > self.max_omega)
+                | (torch.abs(omega3) > self.max_omega)
+            )
+            message = 'extreme omega!'
+        else:
+            p, q, r = env.model.get_angular_velocity()
+            omega_norm = torch.sqrt(p * p + q * q + r * r)
+            bad_done = omega_norm > self.max_omega_norm
+            message = 'angular velocity norm is too high!'
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
         if torch.any(bad_done):
-            self.log(f'extreme omega!')
+            self.log(message)
             if getattr(self.config, 'termination_verbose', True):
-                print(torch.sum(bad_done), 'extreme omega!')
+                print(torch.sum(bad_done), message)
         return bad_done, done, exceed_time_limit, info

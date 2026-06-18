@@ -111,6 +111,17 @@ class F16SimRunner(Runner):
                 else:
                     train_infos["average_episode_rewards"] = 0.0
                     logging.info("no completed episode in this rollout; set average_episode_rewards=0.0")
+                clean_done_count = (self.buffer.masks[1:] == 0).sum().item()
+                bad_done_count = (self.buffer.bad_masks[1:] == 0).sum().item()
+                train_infos["rollout/clean_done_count"] = clean_done_count
+                train_infos["rollout/bad_done_count"] = bad_done_count
+                train_infos["rollout/termination_count"] = clean_done_count + bad_done_count
+                if clean_done_count + bad_done_count > 0:
+                    train_infos["rollout/bad_done_fraction"] = (
+                        bad_done_count / (clean_done_count + bad_done_count)
+                    )
+                else:
+                    train_infos["rollout/bad_done_fraction"] = 0.0
                 self._append_task_train_infos(train_infos)
                 logging.info("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
 

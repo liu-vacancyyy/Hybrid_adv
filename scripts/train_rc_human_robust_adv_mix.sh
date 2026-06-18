@@ -17,7 +17,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
 SEED="${SEED:-23}"
 EXP="${RC_HUMAN_ROBUST_EXP_NAME:-rc_human_rl_robust_adv10_uniform120_from_ep650_adv999}"
@@ -42,8 +42,12 @@ ENTROPY_COEF="${ENTROPY_COEF:-1e-3}"
 export RC_HUMAN_MODE_ORDER="${RC_HUMAN_MODE_ORDER:-0 1 2 5 3 4}"
 export RC_HUMAN_MAX_MODE_SLOTS="${RC_HUMAN_MAX_MODE_SLOTS:-6}"
 
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "Python executable not found or not executable: ${PYTHON_BIN}" >&2
+if [ -x "${PYTHON_BIN}" ]; then
+    :
+elif command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v "${PYTHON_BIN}")
+else
+    echo "Python executable not found: ${PYTHON_BIN}. Activate your environment or set PYTHON_BIN=/path/to/python." >&2
     exit 1
 fi
 if [ ! -f "${INIT_ACTOR_CKPT}" ]; then

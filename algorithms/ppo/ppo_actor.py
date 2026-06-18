@@ -21,6 +21,7 @@ class PPOActor(nn.Module):
         self.use_recurrent_policy = args.use_recurrent_policy
         self.recurrent_hidden_size = args.recurrent_hidden_size
         self.recurrent_hidden_layers = args.recurrent_hidden_layers
+        self.use_safety_aux = bool(getattr(args, 'use_safety_aux', False))
         self.tpdv = dict(dtype=torch.float32, device=device)
         self.use_prior = args.use_prior
         # (1) feature extraction module
@@ -32,6 +33,8 @@ class PPOActor(nn.Module):
             input_size = self.rnn.output_size
         # (3) act module
         self.act = ACTLayer(act_space, input_size, self.act_hidden_size, self.activation_id, self.gain)
+        if self.use_safety_aux:
+            self.safety_out = nn.Linear(input_size, 1)
 
         self.to(device)
 
@@ -97,3 +100,16 @@ class PPOActor(nn.Module):
             action_log_probs, dist_entropy = self.act.evaluate_actions(actor_features, action, active_masks)
 
         return action_log_probs, dist_entropy
+
+    def predict_safety(self, obs, rnn_states, masks):
+        """Predict whether the current state will hit bad_done soon."""
+        if not self.use_safety_aux:
+            raise RuntimeError('predict_safety called while use_safety_aux=False')
+        obs = check(obs).to(**self.tpdv)
+        rnn_states = check(rnn_states).to(**self.tpdv)
+        masks = check(masks).to(**self.tpdv)
+
+        actor_features = self.base(obs)
+        if self.use_recurrent_policy:
+            actor_features, _ = self.rnn(actor_features, rnn_states, masks)
+        return self.safety_out(actor_features)

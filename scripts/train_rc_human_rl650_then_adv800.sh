@@ -9,11 +9,15 @@ REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 RUNS_ROOT="${REPO_ROOT}/scripts/runs"
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
 
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "Python executable not found or not executable: ${PYTHON_BIN}" >&2
+if [ -x "${PYTHON_BIN}" ]; then
+    :
+elif command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v "${PYTHON_BIN}")
+else
+    echo "Python executable not found: ${PYTHON_BIN}. Activate your environment or set PYTHON_BIN=/path/to/python." >&2
     exit 1
 fi
 

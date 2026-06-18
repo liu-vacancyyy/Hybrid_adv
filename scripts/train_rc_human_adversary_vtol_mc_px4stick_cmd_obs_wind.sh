@@ -18,7 +18,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/a/anaconda3/envs/Neuralplane/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 DEVICE="${DEVICE:-cuda:0}"
 VICTIM_CKPT="${VICTIM_CKPT:-${REPO_ROOT}/scripts/runs/2026-06-03_15-49-07_Control_rc_human_HYBRID_NEW_ppo_rc_human_rl_gru_wind_modes012534_to_ep650_20260603_154906/episode_650/actor_latest.ckpt}"
 EXP="${RC_HUMAN_ADV_EXP_NAME:-rc_human_adv_vtol_mc_px4stick_cmd_obs_dryden_wind_from_ep650}"
@@ -35,8 +35,12 @@ SAVE_INTERVAL="${ADV_SAVE_INTERVAL:-10}"
 export RC_HUMAN_MODE_ORDER="${RC_HUMAN_MODE_ORDER:-0 1 2 5 3 4}"
 export RC_HUMAN_MAX_MODE_SLOTS="${RC_HUMAN_MAX_MODE_SLOTS:-6}"
 
-if [ ! -x "${PYTHON_BIN}" ]; then
-    echo "Python executable not found or not executable: ${PYTHON_BIN}" >&2
+if [ -x "${PYTHON_BIN}" ]; then
+    :
+elif command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v "${PYTHON_BIN}")
+else
+    echo "Python executable not found: ${PYTHON_BIN}. Activate your environment or set PYTHON_BIN=/path/to/python." >&2
     exit 1
 fi
 

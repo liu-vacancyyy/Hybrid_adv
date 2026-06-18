@@ -16,6 +16,7 @@ from hybrid_termination_conditions.extreme_angle import ExtremeAngle
 from hybrid_termination_conditions.extreme_omega import ExtremeOmega
 from hybrid_termination_conditions.overload import Overload
 from hybrid_termination_conditions.high_speed import HighSpeed
+from hybrid_termination_conditions.body_side_velocity import BodySideVelocity
 from termination_conditions.hover_timeout_done import HoverTimeoutDone
 from utils.utils import wrap_PI
 
@@ -118,6 +119,39 @@ class RPYThrottleHumanTask(RCHumanTask):
         self.success_overshoot = float(getattr(
             config, 'rpy_throttle_success_overshoot', 0.20
         ))
+        self.safety_override_enable = bool(getattr(
+            config, 'rpy_throttle_safety_override_enable', False
+        ))
+        self.safety_speed_enter = float(getattr(
+            config, 'rpy_throttle_safety_speed_enter', 8.0
+        ))
+        self.safety_speed_exit = float(getattr(
+            config, 'rpy_throttle_safety_speed_exit', 6.5
+        ))
+        self.safety_altitude_enter = float(getattr(
+            config, 'rpy_throttle_safety_altitude_enter', 1.5
+        ))
+        self.safety_altitude_exit = float(getattr(
+            config, 'rpy_throttle_safety_altitude_exit', 3.0
+        ))
+        self.safety_angle_enter_deg = float(getattr(
+            config, 'rpy_throttle_safety_angle_enter_deg', 18.0
+        ))
+        self.safety_angle_exit_deg = float(getattr(
+            config, 'rpy_throttle_safety_angle_exit_deg', 10.0
+        ))
+        self.safety_omega_enter = float(getattr(
+            config, 'rpy_throttle_safety_omega_enter', 3.0
+        ))
+        self.safety_omega_exit = float(getattr(
+            config, 'rpy_throttle_safety_omega_exit', 1.5
+        ))
+        self.safety_min_hold_steps = int(getattr(
+            config, 'rpy_throttle_safety_min_hold_steps', 50
+        ))
+        self.safety_recover_steps = int(getattr(
+            config, 'rpy_throttle_safety_recover_steps', 50
+        ))
 
         self.target_roll = torch.zeros(self.n, device=self.device)
         self.target_pitch = torch.zeros(self.n, device=self.device)
@@ -136,6 +170,13 @@ class RPYThrottleHumanTask(RCHumanTask):
         self.episode_overshoot_sum = torch.zeros(self.n, device=self.device)
         self.episode_metric_count = torch.zeros(self.n, device=self.device)
         self.episode_metric_skipped_count = torch.zeros(self.n, device=self.device)
+        self.last_reward_terms = {}
+        self.safety_override_active = torch.zeros(
+            self.n, dtype=torch.bool, device=self.device)
+        self.safety_hold_left = torch.zeros(
+            self.n, dtype=torch.long, device=self.device)
+        self.safety_recovered_steps = torch.zeros(
+            self.n, dtype=torch.long, device=self.device)
 
         self.reward_functions = [
             make_rpy_throttle_reward(self.config),
@@ -145,6 +186,7 @@ class RPYThrottleHumanTask(RCHumanTask):
             Overload(self.config),
             LowAltitude(self.config),
             HighSpeed(self.config),
+            BodySideVelocity(self.config),
             ExtremeAngle(self.config),
             ExtremeOmega(self.config),
             HoverTimeoutDone(self.config),
@@ -201,6 +243,9 @@ class RPYThrottleHumanTask(RCHumanTask):
         self.episode_overshoot_sum[reset] = 0.0
         self.episode_metric_count[reset] = 0.0
         self.episode_metric_skipped_count[reset] = 0.0
+        self.safety_override_active[reset] = False
+        self.safety_hold_left[reset] = 0
+        self.safety_recovered_steps[reset] = 0
 
     def _curriculum_amplitude(self, level, mode):
         if not self.curriculum_enable:
@@ -409,6 +454,129 @@ class RPYThrottleHumanTask(RCHumanTask):
                 self.mode5_pre_release_raw[recovered] = 0.0
                 self.dwell_left[recovered] = 0
 
+    def _safety_envelope_masks(self, env):
+        _npos, _epos, altitude = env.model.get_position()
+        roll, pitch, _heading = env.model.get_posture()
+        roll_rate, pitch_rate, yaw_rate = env.model.get_euler_angular_velocity()
+        speed = env.model.get_TAS()
+        angle_deg = torch.maximum(
+            torch.abs(torch.rad2deg(roll)),
+            torch.abs(torch.rad2deg(pitch)),
+        )
+        omega = torch.maximum(
+            torch.maximum(torch.abs(roll_rate), torch.abs(pitch_rate)),
+            torch.abs(yaw_rate),
+        )
+
+        enter = (
+            (speed >= self.safety_speed_enter)
+            | (altitude <= self.safety_altitude_enter)
+            | (angle_deg >= self.safety_angle_enter_deg)
+            | (omega >= self.safety_omega_enter)
+        )
+        exit_ready = (
+            (speed <= self.safety_speed_exit)
+            & (altitude >= self.safety_altitude_exit)
+            & (angle_deg <= self.safety_angle_exit_deg)
+            & (omega <= self.safety_omega_exit)
+        )
+        return enter, exit_ready
+
+    def _update_safety_override_state(self, env, mask):
+        if (not self.safety_override_enable) or int(torch.sum(mask).item()) == 0:
+            return
+
+        enter, exit_ready = self._safety_envelope_masks(env)
+        enter = enter & mask
+        new_enter = enter & (~self.safety_override_active)
+        if torch.any(new_enter):
+            self.safety_override_active[new_enter] = True
+            self.safety_hold_left[new_enter] = max(self.safety_min_hold_steps, 1)
+            self.safety_recovered_steps[new_enter] = 0
+            self.command_transient_left[new_enter] = torch.maximum(
+                self.command_transient_left[new_enter],
+                torch.full_like(
+                    self.command_transient_left[new_enter],
+                    max(self.command_transient_grace_steps, 0),
+                ),
+            )
+
+        active = mask & self.safety_override_active
+        if not torch.any(active):
+            return
+
+        self.safety_hold_left[active] = torch.clamp(
+            self.safety_hold_left[active] - 1, min=0
+        )
+        safe_active = active & exit_ready
+        unsafe_active = active & (~exit_ready)
+        self.safety_recovered_steps[unsafe_active] = 0
+        self.safety_recovered_steps[safe_active] += 1
+
+        can_exit = (
+            active
+            & (self.safety_hold_left <= 0)
+            & (self.safety_recovered_steps >= max(self.safety_recover_steps, 1))
+        )
+        if torch.any(can_exit):
+            self.safety_override_active[can_exit] = False
+            self.safety_hold_left[can_exit] = 0
+            self.safety_recovered_steps[can_exit] = 0
+            self.dwell_left[can_exit] = 0
+            self.command_transient_left[can_exit] = torch.maximum(
+                self.command_transient_left[can_exit],
+                torch.full_like(
+                    self.command_transient_left[can_exit],
+                    max(self.command_transient_grace_steps, 0),
+                ),
+            )
+
+    def _apply_safety_hover_override(self, mask, env):
+        if int(torch.sum(mask).item()) == 0:
+            return
+
+        self.desired_raw_vx[mask] = 0.0
+        self.desired_raw_vy[mask] = 0.0
+        self.desired_raw_vz[mask] = 0.0
+        self.desired_raw_yaw[mask] = 0.0
+        self.raw_vx[mask] = 0.0
+        self.raw_vy[mask] = 0.0
+        self.raw_vz[mask] = 0.0
+        self.raw_yaw[mask] = 0.0
+        self.stick_vx[mask] = 0.0
+        self.stick_vy[mask] = 0.0
+        self.stick_vz[mask] = 0.0
+        self.stick_yaw[mask] = 0.0
+
+        self.target_roll[mask] = 0.0
+        self.target_pitch[mask] = 0.0
+        self.target_yaw_rate[mask] = 0.0
+        self.target_collective[mask] = self.hover_collective[mask]
+        self.target_throttle_frac[mask] = 0.0
+
+        self.command_rate_limited[mask] = False
+        self.command_raw_delta[mask] = 0.0
+        self.mode5_release_state[mask] = 0
+        self.mode5_hold_elapsed[mask] = 0
+        self.mode5_recovery_left[mask] = 0
+        self.mode5_pre_release_raw[mask] = 0.0
+        self.dwell_left[mask] = torch.maximum(
+            self.dwell_left[mask],
+            torch.ones_like(self.dwell_left[mask]),
+        )
+
+    def _advance_command(self, env, mask):
+        if not self.safety_override_enable:
+            return super()._advance_command(env, mask)
+
+        self._update_safety_override_state(env, mask)
+        manual = mask & (~self.safety_override_active)
+        if torch.any(manual):
+            super()._advance_command(env, manual)
+
+        override = mask & self.safety_override_active
+        self._apply_safety_hover_override(override, env)
+
     def _update_px4_vtol_mc_targets_from_sticks(self, mask, env):
         stick_pitch, stick_roll = self._limit_stick_unit_length_xy(
             self.stick_vx[mask], self.stick_vy[mask]
@@ -446,6 +614,8 @@ class RPYThrottleHumanTask(RCHumanTask):
 
     def compute_overshoot_score(self, roll_error, pitch_error, yaw_rate_error, throttle_error):
         valid = self.command_transient_left <= 0
+        if self.safety_override_enable:
+            valid = valid & (~self.safety_override_active)
         crossed_roll = valid & (self.prev_roll_error * roll_error < 0.0)
         crossed_pitch = valid & (self.prev_pitch_error * pitch_error < 0.0)
         crossed_yaw = valid & (self.prev_yaw_rate_error * yaw_rate_error < 0.0)
@@ -494,6 +664,8 @@ class RPYThrottleHumanTask(RCHumanTask):
         valid = torch.ones_like(attitude_error, dtype=torch.bool, device=self.device)
         if self.success_ignore_transient:
             valid = valid & (self.command_transient_left <= 0)
+        if self.safety_override_enable:
+            valid = valid & (~self.safety_override_active)
 
         valid_f = valid.detach().float()
         self.episode_attitude_error_sum += attitude_error.detach() * valid_f
@@ -549,6 +721,15 @@ class RPYThrottleHumanTask(RCHumanTask):
             'rpy_throttle/overshoot_mean': mean_overshoot.mean(),
             'rpy_throttle/throttle_delta_limit_mean': self.vx_forward_limit.mean(),
             'rpy_throttle/target_collective_mean': self.target_collective.mean(),
+            'rpy_throttle/target_roll_abs_deg_mean': torch.rad2deg(
+                torch.abs(self.target_roll)).mean(),
+            'rpy_throttle/target_pitch_abs_deg_mean': torch.rad2deg(
+                torch.abs(self.target_pitch)).mean(),
+            'rpy_throttle/target_yaw_rate_abs_mean': torch.abs(
+                self.target_yaw_rate).mean(),
+            'rpy_throttle/target_throttle_frac_abs_mean': torch.abs(
+                self.target_throttle_frac).mean(),
+            'rpy_throttle/target_throttle_frac_mean': self.target_throttle_frac.mean(),
         }
         metric_total = self.episode_metric_count + self.episode_metric_skipped_count
         metrics['rpy_throttle/success_metric_valid_fraction'] = (
@@ -571,6 +752,14 @@ class RPYThrottleHumanTask(RCHumanTask):
             self.mode5_release_state == 1).float().mean()
         metrics['rpy_throttle/mode5_released_fraction'] = (
             self.mode5_release_state == 2).float().mean()
+        metrics['rpy_throttle/safety_override_enabled'] = torch.tensor(
+            float(self.safety_override_enable), device=self.device)
+        metrics['rpy_throttle/safety_override_fraction'] = (
+            self.safety_override_active.float().mean())
+        metrics['rpy_throttle/safety_recovered_steps_mean'] = (
+            self.safety_recovered_steps.float().mean())
+        for key, value in self.last_reward_terms.items():
+            metrics[f'rpy_throttle/{key}'] = value
         return metrics
 
     def _build_obs(self, env, add_sensor_noise):
