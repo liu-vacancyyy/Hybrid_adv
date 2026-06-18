@@ -120,6 +120,10 @@ rpy_throttle_reach_max_collective_frac: 1.18
 rpy_throttle_reach_ramp_steps_min: 35
 rpy_throttle_reach_ramp_steps_max: 120
 rpy_throttle_reach_recover_ramp_steps: 80
+rpy_throttle_reach_transition_step_weight: 0.20
+rpy_throttle_reach_transition_ramp_weight: 0.30
+rpy_throttle_reach_transition_smooth_weight: 0.35
+rpy_throttle_reach_transition_cosine_weight: 0.15
 rpy_throttle_reach_transient_grace_steps: 45
 rpy_throttle_reach_success_ignore_transient: true
 rpy_throttle_reach_success_attitude_error: 0.05236

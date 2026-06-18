@@ -62,6 +62,13 @@ class RPYThrottleReachTask(BaseTask):
         self.recover_ramp_steps = int(getattr(
             config, 'rpy_throttle_reach_recover_ramp_steps', 80
         ))
+        transition_weights = [
+            float(getattr(config, 'rpy_throttle_reach_transition_step_weight', 0.20)),
+            float(getattr(config, 'rpy_throttle_reach_transition_ramp_weight', 0.30)),
+            float(getattr(config, 'rpy_throttle_reach_transition_smooth_weight', 0.35)),
+            float(getattr(config, 'rpy_throttle_reach_transition_cosine_weight', 0.15)),
+        ]
+        self.transition_weights = self._normalize_transition_weights(transition_weights)
 
         self.levels_per_mode = int(getattr(
             config, 'rpy_throttle_reach_levels_per_mode', 10
@@ -210,6 +217,7 @@ class RPYThrottleReachTask(BaseTask):
         self.start_throttle_frac = torch.zeros(self.n, device=self.device)
         self.command_start_step = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.command_ramp_steps = torch.ones(self.n, dtype=torch.long, device=self.device)
+        self.command_profile = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.command_transient_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.last_synced_step = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.hover_collective = torch.ones(self.n, device=self.device)
@@ -297,20 +305,33 @@ class RPYThrottleReachTask(BaseTask):
         self._sample_final_targets(idx, sampled_level, mode)
 
         ramp_steps = self._sample_ramp_steps(sampled_level, mode)
+        transition_profile = self._sample_transition_profile(idx)
         # BaseEnv resets step_count after task.reset(), so use the known
         # post-reset value instead of the stale terminal step count.
         self.command_start_step[idx] = 0
         self.command_ramp_steps[idx] = ramp_steps
+        self.command_profile[idx] = transition_profile
         self.last_synced_step[idx] = 0
+        transient_steps = torch.where(
+            transition_profile == 0,
+            torch.zeros_like(ramp_steps),
+            ramp_steps,
+        )
         self.command_transient_left[idx] = torch.maximum(
             torch.full_like(self.command_transient_left[idx], self.transient_grace_steps),
-            ramp_steps,
+            transient_steps,
         )
 
         self.target_roll[idx] = self.start_roll[idx]
         self.target_pitch[idx] = self.start_pitch[idx]
         self.target_yaw[idx] = self.start_yaw[idx]
         self.target_throttle_frac[idx] = self.start_throttle_frac[idx]
+        step_idx = idx[transition_profile == 0]
+        if step_idx.numel() > 0:
+            self.target_roll[step_idx] = self.final_roll[step_idx]
+            self.target_pitch[step_idx] = self.final_pitch[step_idx]
+            self.target_yaw[step_idx] = self.final_yaw[step_idx]
+            self.target_throttle_frac[step_idx] = self.final_throttle_frac[step_idx]
         self.target_collective[idx] = self.hover_collective[idx] * (
             1.0 + self.target_throttle_frac[idx]
         )
@@ -363,6 +384,33 @@ class RPYThrottleReachTask(BaseTask):
         self.mix_easy /= total
         self.mix_medium /= total
         self.mix_random /= total
+
+    def _normalize_transition_weights(self, weights):
+        weights = torch.tensor(weights, dtype=torch.float32, device=self.device)
+        weights = torch.clamp(weights, min=0.0)
+        total = weights.sum()
+        if total <= 1e-6:
+            return torch.full((4,), 0.25, dtype=torch.float32, device=self.device)
+        return weights / total
+
+    def _sample_transition_profile(self, idx):
+        selector = torch.rand(idx.numel(), device=self.device)
+        cumulative = torch.cumsum(self.transition_weights, dim=0)
+        profile = torch.zeros(idx.numel(), dtype=torch.long, device=self.device)
+        profile = torch.where(selector >= cumulative[0], torch.ones_like(profile), profile)
+        profile = torch.where(selector >= cumulative[1], torch.full_like(profile, 2), profile)
+        profile = torch.where(selector >= cumulative[2], torch.full_like(profile, 3), profile)
+        return profile
+
+    def _command_phase(self, raw_phase, profile):
+        raw_phase = torch.clamp(raw_phase, 0.0, 1.0)
+        linear = raw_phase
+        smooth = raw_phase * raw_phase * (3.0 - 2.0 * raw_phase)
+        cosine = 0.5 - 0.5 * torch.cos(raw_phase * math.pi)
+        phase = torch.where(profile == 0, torch.ones_like(raw_phase), linear)
+        phase = torch.where(profile == 2, smooth, phase)
+        phase = torch.where(profile == 3, cosine, phase)
+        return phase
 
     def _randint_level_between(self, low, high):
         low = torch.clamp(low.long(), 0, self.max_curriculum_level)
@@ -606,8 +654,8 @@ class RPYThrottleReachTask(BaseTask):
         if torch.any(normal):
             elapsed = (env.step_count[normal].long() - self.command_start_step[normal]).float()
             denom = torch.clamp(self.command_ramp_steps[normal].float(), min=1.0)
-            phase = torch.clamp(elapsed / denom, 0.0, 1.0)
-            phase = phase * phase * (3.0 - 2.0 * phase)
+            raw_phase = torch.clamp(elapsed / denom, 0.0, 1.0)
+            phase = self._command_phase(raw_phase, self.command_profile[normal])
             self.target_roll[normal] = self.start_roll[normal] + phase * (
                 self.final_roll[normal] - self.start_roll[normal]
             )
@@ -701,6 +749,7 @@ class RPYThrottleReachTask(BaseTask):
             self.start_throttle_frac[can_exit] = throttle_frac[can_exit]
             self.command_start_step[can_exit] = env.step_count[can_exit].long()
             self.command_ramp_steps[can_exit] = max(self.recover_ramp_steps, 1)
+            self.command_profile[can_exit] = 2
             self.command_transient_left[can_exit] = torch.maximum(
                 self.command_transient_left[can_exit],
                 torch.full_like(self.command_transient_left[can_exit], self.transient_grace_steps),
@@ -838,7 +887,12 @@ class RPYThrottleReachTask(BaseTask):
             vt = torch.clamp(vt + torch.randn_like(vt) * self.sensor_vel_std, min=0.0)
 
         elapsed = (env.step_count.long() - self.command_start_step).float()
-        ramp_phase = torch.clamp(elapsed / torch.clamp(self.command_ramp_steps.float(), min=1.0), 0.0, 1.0)
+        raw_ramp_phase = torch.clamp(
+            elapsed / torch.clamp(self.command_ramp_steps.float(), min=1.0),
+            0.0,
+            1.0,
+        )
+        ramp_phase = self._command_phase(raw_ramp_phase, self.command_profile)
         level_progress = self._level_progress(self.sampled_level)
         pool_fill = torch.full(
             (self.n, 1),
@@ -931,6 +985,14 @@ class RPYThrottleReachTask(BaseTask):
         for mode_id in range(10):
             metrics[f'rpy_throttle_reach/mode_{mode_id}_fraction'] = (
                 self.operation_mode == mode_id).float().mean()
+        metrics['rpy_throttle_reach/transition_step_fraction'] = (
+            self.command_profile == 0).float().mean()
+        metrics['rpy_throttle_reach/transition_ramp_fraction'] = (
+            self.command_profile == 1).float().mean()
+        metrics['rpy_throttle_reach/transition_smooth_fraction'] = (
+            self.command_profile == 2).float().mean()
+        metrics['rpy_throttle_reach/transition_cosine_fraction'] = (
+            self.command_profile == 3).float().mean()
         for key, value in self.last_reward_terms.items():
             metrics[f'rpy_throttle_reach/{key}'] = value
         return metrics
