@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PPO-GRU training for the RPY + throttle one-shot reach task, no wind, with
-# the forward/head motor physically disabled.
+# CPO-style constrained GRU training for the RPY + throttle one-shot reach
+# task, no wind, with the forward/head motor physically disabled.
 #
 # Task target:
 #   one episode: initial attitude -> commanded roll/pitch/yaw/throttle target
 #
-# Curriculum:
-#   10 modes x 10 levels.  Modes 0-4 start from hover; modes 5-9 start from
-#   the online pose pool and reuse the difficulty of mode(x-5).
+# Sampling:
+#   Curriculum is disabled.  Before the online pose pool is sufficiently filled,
+#   levels are sampled uniformly from modes 0-4.  Afterwards levels are sampled
+#   uniformly from modes 0-9.
 #
 # Run:
 #   cd /home/a/demo/Hybrid_adv
@@ -27,7 +28,7 @@ SEED="${SEED:-7}"
 ENV_NAME="Control"
 SCENARIO_NAME="${SCENARIO_NAME:-rpy_throttle_reach_no_forward_nowind}"
 MODEL_NAME="HYBRID_NEW_NO_FORWARD"
-ALGO_NAME="ppo"
+ALGO_NAME="${ALGO_NAME:-cpo}"
 
 export RPY_THROTTLE_REACH_MAX_MODE_SLOTS="${RPY_THROTTLE_REACH_MAX_MODE_SLOTS:-10}"
 
@@ -54,6 +55,10 @@ USE_SAFETY_AUX="${USE_SAFETY_AUX:-1}"
 SAFETY_AUX_HORIZON="${SAFETY_AUX_HORIZON:-25}"
 SAFETY_AUX_LOSS_COEF="${SAFETY_AUX_LOSS_COEF:-0.10}"
 SAFETY_AUX_POS_WEIGHT="${SAFETY_AUX_POS_WEIGHT:-5.0}"
+COST_LIMIT="${COST_LIMIT:-0.02}"
+COST_LAGRANGE_INIT="${COST_LAGRANGE_INIT:-1.0}"
+COST_LAGRANGE_LR="${COST_LAGRANGE_LR:-0.05}"
+COST_VALUE_LOSS_COEF="${COST_VALUE_LOSS_COEF:-0.25}"
 
 for arg in "$@"; do
     case "${arg}" in
@@ -137,6 +142,11 @@ TRAIN_CMD=(
     --max-grad-norm "${MAX_GRAD_NORM}"
     --target-kl "${TARGET_KL}"
     --max-log-ratio "${MAX_LOG_RATIO}"
+    --use-cost-constraints
+    --cost-limit "${COST_LIMIT}"
+    --cost-lagrange-init "${COST_LAGRANGE_INIT}"
+    --cost-lagrange-lr "${COST_LAGRANGE_LR}"
+    --cost-value-loss-coef "${COST_VALUE_LOSS_COEF}"
     "${SAFETY_AUX_ARGS[@]}"
     --entropy-coef "${ENTROPY_COEF}"
     --hidden-size "128 128"
@@ -151,14 +161,17 @@ TRAIN_CMD=(
 
 echo "rpy_throttle reach no-forward no-wind from-scratch training"
 echo "  experiment: ${EXP}"
+echo "  algorithm: ${ALGO_NAME} (cost constraint uses bad_done as terminal cost)"
 echo "  env/model: ${ENV_NAME}/${SCENARIO_NAME}/${MODEL_NAME}"
 echo "  motor0: forced to 0N by HYBRID_NEW_NO_FORWARD model"
+echo "  curriculum: disabled; uniform modes 0-4 until pose_pool_insert_count is ready, then uniform modes 0-9"
 echo "  seed/device: ${SEED}/${DEVICE}"
 echo "  max_mode_slots: ${RPY_THROTTLE_REACH_MAX_MODE_SLOTS}"
 echo "  rollout_threads=${N_ROLLOUT_THREADS}, buffer_size=${BUFFER_SIZE}, num_env_steps=${NUM_ENV_STEPS}"
 echo "  lr=${LR}, value_loss_coef=${VALUE_LOSS_COEF}, clipped_value_loss=${USE_CLIPPED_VALUE_LOSS}"
 echo "  ppo_epoch=${PPO_EPOCH}, num_mini_batch=${NUM_MINI_BATCH}, entropy_coef=${ENTROPY_COEF}"
 echo "  max_grad_norm=${MAX_GRAD_NORM}, target_kl=${TARGET_KL}, max_log_ratio=${MAX_LOG_RATIO}"
+echo "  cost_limit=${COST_LIMIT}, lagrange_init=${COST_LAGRANGE_INIT}, lagrange_lr=${COST_LAGRANGE_LR}, cost_value_loss_coef=${COST_VALUE_LOSS_COEF}"
 echo "  safety_aux=${USE_SAFETY_AUX}, horizon=${SAFETY_AUX_HORIZON}, loss_coef=${SAFETY_AUX_LOSS_COEF}, pos_weight=${SAFETY_AUX_POS_WEIGHT}"
 
 case "${DRY_RUN:-0}" in

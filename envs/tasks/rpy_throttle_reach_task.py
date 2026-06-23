@@ -16,7 +16,6 @@ from hybrid_termination_conditions.extreme_angle import ExtremeAngle
 from hybrid_termination_conditions.extreme_omega import ExtremeOmega
 from hybrid_termination_conditions.overload import Overload
 from hybrid_termination_conditions.high_speed import HighSpeed
-from hybrid_termination_conditions.body_side_velocity import BodySideVelocity
 from termination_conditions.hover_timeout_done import HoverTimeoutDone
 from utils.utils import wrap_PI
 
@@ -83,6 +82,9 @@ class RPYThrottleReachTask(BaseTask):
         self.curriculum_enable = bool(getattr(
             config, 'rpy_throttle_reach_curriculum_enable', True
         ))
+        self.uniform_mode_when_no_curriculum = bool(getattr(
+            config, 'rpy_throttle_reach_uniform_mode_when_no_curriculum', True
+        ))
         self.initial_curriculum_level = int(getattr(
             config, 'rpy_throttle_reach_initial_curriculum_level', 10
         ))
@@ -125,12 +127,6 @@ class RPYThrottleReachTask(BaseTask):
         ))
         self.safety_speed_exit = float(getattr(
             config, 'rpy_throttle_reach_safety_speed_exit', 6.5
-        ))
-        self.safety_side_enter = float(getattr(
-            config, 'rpy_throttle_reach_safety_side_enter', 1.6
-        ))
-        self.safety_side_exit = float(getattr(
-            config, 'rpy_throttle_reach_safety_side_exit', 1.0
         ))
         self.safety_altitude_enter = float(getattr(
             config, 'rpy_throttle_reach_safety_altitude_enter', 1.5
@@ -201,6 +197,11 @@ class RPYThrottleReachTask(BaseTask):
         self.pose_pool_write_ptr = 0
         self.pose_pool_bootstrapped = False
         self.pose_pool_insert_count = 0
+        self.pose_pool_ready_insert_count = int(getattr(
+            config,
+            'rpy_throttle_reach_pose_pool_ready_insert_count',
+            max(1, self.pose_pool_capacity // 2),
+        ))
 
         self.target_roll = torch.zeros(self.n, device=self.device)
         self.target_pitch = torch.zeros(self.n, device=self.device)
@@ -236,6 +237,7 @@ class RPYThrottleReachTask(BaseTask):
         self.episode_metric_skipped_count = torch.zeros(self.n, device=self.device)
         self.episode_count = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.last_reward_terms = {}
+        self.last_constraint_terms = {}
 
         self.operation_mode = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.curriculum_level = torch.full(
@@ -259,7 +261,6 @@ class RPYThrottleReachTask(BaseTask):
             Overload(self.config),
             LowAltitude(self.config),
             HighSpeed(self.config),
-            BodySideVelocity(self.config),
             ExtremeAngle(self.config),
             ExtremeOmega(self.config),
             HoverTimeoutDone(self.config),
@@ -421,8 +422,22 @@ class RPYThrottleReachTask(BaseTask):
 
     def _sample_command_level(self, idx):
         if not self.curriculum_enable:
-            return torch.full((idx.numel(),), self.max_curriculum_level,
-                              device=self.device, dtype=torch.long)
+            if not self.uniform_mode_when_no_curriculum:
+                return torch.full((idx.numel(),), self.max_curriculum_level,
+                                  device=self.device, dtype=torch.long)
+            if idx.numel() == 0:
+                return torch.empty(0, device=self.device, dtype=torch.long)
+            max_open_slots = self.active_mode_slots
+            if not self._pose_pool_ready_for_pool_modes():
+                max_open_slots = min(max_open_slots, 5)
+            max_open_slots = max(1, max_open_slots)
+            mode_slot = torch.randint(
+                0, max_open_slots, (idx.numel(),), device=self.device, dtype=torch.long
+            )
+            sublevel = torch.randint(
+                0, self.levels_per_mode, (idx.numel(),), device=self.device, dtype=torch.long
+            )
+            return mode_slot * self.levels_per_mode + sublevel
 
         current = torch.clamp(self.curriculum_level[idx], 0, self.max_curriculum_level)
         sampled = current.clone()
@@ -451,6 +466,12 @@ class RPYThrottleReachTask(BaseTask):
             high = current[random_mask]
             sampled[random_mask] = self._randint_level_between(torch.zeros_like(high), high)
         return sampled
+
+    def _pose_pool_ready_for_pool_modes(self):
+        return (
+            self.pose_pool_valid_count > 0
+            and self.pose_pool_insert_count >= self.pose_pool_ready_insert_count
+        )
 
     def _curriculum_mode_from_level(self, level):
         mode_slot = torch.clamp(level // self.levels_per_mode, 0, self.active_mode_slots - 1)
@@ -495,7 +516,24 @@ class RPYThrottleReachTask(BaseTask):
             values[combined, :] *= torch.tensor([1.0, 1.0, 0.8, 0.7], device=self.device)
         hard = difficulty_mode == 4
         if torch.any(hard):
-            values[hard, :] = (0.35 + 0.65 * torch.rand(int(hard.sum().item()), 4, device=self.device)) * amp[hard].reshape(-1, 1) * signs[hard]
+            hard_count = int(hard.sum().item())
+            hard_values = (
+                (0.35 + 0.65 * torch.rand(hard_count, 4, device=self.device))
+                * amp[hard].reshape(-1, 1)
+                * signs[hard]
+            )
+            axis_count = torch.where(
+                torch.rand(hard_count, device=self.device) < 0.30,
+                torch.full((hard_count,), 4, dtype=torch.long, device=self.device),
+                torch.randint(2, 4, (hard_count,), device=self.device),
+            )
+            axis_score = torch.rand(hard_count, 4, device=self.device)
+            axis_rank = torch.argsort(axis_score, dim=1)
+            axis_ids = torch.arange(4, device=self.device).reshape(1, 4)
+            active_axis = axis_ids >= (4 - axis_count).reshape(-1, 1)
+            active_mask = torch.zeros_like(hard_values, dtype=torch.bool)
+            active_mask.scatter_(1, axis_rank, active_axis)
+            values[hard] = torch.where(active_mask, hard_values, torch.zeros_like(hard_values))
 
         self.final_roll[idx] = torch.clamp(values[:, 0], -1.0, 1.0) * self.roll_limit
         self.final_pitch[idx] = torch.clamp(values[:, 1], -1.0, 1.0) * self.pitch_limit
@@ -551,7 +589,10 @@ class RPYThrottleReachTask(BaseTask):
 
         valid_score = self.pose_pool_score[:valid_count]
         order = torch.argsort(valid_score, descending=False)
-        pool_mode = torch.clamp(mode - 5, 0, 4)
+        # Keep the first pool modes gentle: mode5 and mode6 both start from
+        # the easiest pose-pool band.  Higher pool modes then move gradually
+        # toward harder stored states, while avoiding the worst tail.
+        pool_mode = torch.clamp(mode - 6, 0, 3)
         band = torch.clamp(
             ((pool_mode.float() + torch.rand(count, device=self.device)) / 5.0)
             * valid_count,
@@ -682,19 +723,16 @@ class RPYThrottleReachTask(BaseTask):
         roll, pitch, yaw = env.model.get_posture()
         p, q, r = env.model.get_angular_velocity()
         speed = env.model.get_TAS()
-        _u, side_v, _w = env.model.get_velocity()
         angle_deg = torch.maximum(torch.abs(torch.rad2deg(roll)), torch.abs(torch.rad2deg(pitch)))
         omega_norm = torch.sqrt(p * p + q * q + r * r)
         enter = (
             (speed >= self.safety_speed_enter)
-            | (torch.abs(side_v) >= self.safety_side_enter)
             | (altitude <= self.safety_altitude_enter)
             | (angle_deg >= self.safety_angle_enter_deg)
             | (omega_norm >= self.safety_omega_enter)
         )
         exit_ready = (
             (speed <= self.safety_speed_exit)
-            & (torch.abs(side_v) <= self.safety_side_exit)
             & (altitude >= self.safety_altitude_exit)
             & (angle_deg <= self.safety_angle_exit_deg)
             & (omega_norm <= self.safety_omega_exit)
@@ -760,9 +798,7 @@ class RPYThrottleReachTask(BaseTask):
         roll, pitch, _yaw = env.model.get_posture()
         p, q, r = env.model.get_angular_velocity()
         speed = env.model.get_TAS()
-        _u, side_v, _w = env.model.get_velocity()
         max_velocity = float(getattr(self.config, 'max_velocity', 10.0))
-        max_side = float(getattr(self.config, 'max_body_y_velocity', getattr(self.config, 'max_y_velocity', 2.0)))
         altitude_limit = float(getattr(self.config, 'altitude_limit', 0.5))
         max_angle = math.radians(min(float(getattr(self.config, 'max_roll', 30.0)), float(getattr(self.config, 'max_pitch', 25.0))))
         max_omega = float(getattr(self.config, 'max_omega_norm', 12.566370614359172))
@@ -771,7 +807,6 @@ class RPYThrottleReachTask(BaseTask):
         omega_norm = torch.sqrt(p * p + q * q + r * r)
         terms = [
             torch.relu((speed - self.safety_speed_exit) / max(max_velocity - self.safety_speed_exit, 1e-6)),
-            torch.relu((torch.abs(side_v) - self.safety_side_exit) / max(max_side - self.safety_side_exit, 1e-6)),
             torch.relu((self.safety_altitude_exit - altitude) / max(self.safety_altitude_exit - altitude_limit, 1e-6)),
             torch.relu((angle - math.radians(self.safety_angle_exit_deg)) / max(max_angle - math.radians(self.safety_angle_exit_deg), 1e-6)),
             torch.relu((omega_norm - self.safety_omega_exit) / max(max_omega - self.safety_omega_exit, 1e-6)),
@@ -779,6 +814,53 @@ class RPYThrottleReachTask(BaseTask):
         danger = torch.stack(terms, dim=1).sum(dim=1)
         safety = torch.exp(-danger * danger)
         return danger, safety
+
+    def update_constraint_terms(self, env):
+        _npos, _epos, altitude = env.model.get_position()
+        roll, pitch, _yaw = env.model.get_posture()
+        p, q, r = env.model.get_angular_velocity()
+        speed = env.model.get_TAS()
+        ax, ay, az = env.model.get_acceleration()
+
+        altitude_limit = float(getattr(self.config, 'altitude_limit', 0.5))
+        max_velocity = float(getattr(self.config, 'max_velocity', 10.0))
+        max_roll = float(getattr(self.config, 'max_roll', 30.0))
+        max_pitch = float(getattr(self.config, 'max_pitch', 25.0))
+        max_omega_norm = float(getattr(
+            self.config,
+            'max_omega_norm',
+            getattr(self.config, 'max_omega', 4.0),
+        ))
+        acceleration_limit = float(getattr(self.config, 'acceleration_limit', 12.0))
+
+        roll_deg = torch.rad2deg(roll)
+        pitch_deg = torch.rad2deg(pitch)
+        omega_norm = torch.sqrt(p * p + q * q + r * r)
+        acceleration = torch.sqrt(ax * ax + ay * ay + az * az)
+
+        low_altitude = altitude < altitude_limit
+        high_speed = speed >= max_velocity
+        extreme_angle = (torch.abs(roll_deg) > max_roll) | (torch.abs(pitch_deg) > max_pitch)
+        extreme_omega = omega_norm > max_omega_norm
+        overload = acceleration > acceleration_limit
+        hard_failure = (
+            low_altitude
+            | high_speed
+            | extreme_angle
+            | extreme_omega
+            | overload
+        )
+
+        self.last_constraint_terms = {
+            'constraint/low_altitude_mean': low_altitude.detach().float().mean(),
+            'constraint/high_speed_mean': high_speed.detach().float().mean(),
+            'constraint/extreme_angle_mean': extreme_angle.detach().float().mean(),
+            'constraint/extreme_omega_mean': extreme_omega.detach().float().mean(),
+            'constraint/overload_mean': overload.detach().float().mean(),
+            'constraint/hard_failure_mean': hard_failure.detach().float().mean(),
+            'constraint/bad_done_cost_mean': env.bad_done.detach().float().mean(),
+        }
+        return hard_failure.float()
 
     def compute_overshoot_score(self, roll_error, pitch_error, yaw_error, throttle_error):
         valid = self.command_transient_left <= 0
@@ -820,15 +902,11 @@ class RPYThrottleReachTask(BaseTask):
         mean_yaw = self.episode_yaw_error_sum / count
         mean_thr = self.episode_throttle_error_sum / count
         mean_over = self.episode_overshoot_sum / count
-        mean_danger = self.episode_danger_sum / count
-        override_fraction = self.episode_override_count / torch.clamp(env.step_count.float(), min=1.0)
         return (
             (mean_att < self.success_attitude_error)
             & (mean_yaw < self.success_yaw_error)
             & (mean_thr < self.success_throttle_error)
             & (mean_over < self.success_overshoot)
-            & (mean_danger < self.success_danger)
-            & (override_fraction < self.success_override_fraction)
         )
 
     def _update_curriculum_from_last_episode(self, env, reset):
@@ -964,6 +1042,10 @@ class RPYThrottleReachTask(BaseTask):
             'rpy_throttle_reach/curriculum_level_mean': self.curriculum_level.float().mean(),
             'rpy_throttle_reach/curriculum_level_max': self.curriculum_level.float().max(),
             'rpy_throttle_reach/curriculum_level_limit': torch.tensor(float(self.max_curriculum_level), device=self.device),
+            'rpy_throttle_reach/uniform_mode_sampling': torch.tensor(float(not self.curriculum_enable), device=self.device),
+            'rpy_throttle_reach/pool_mode_ready': torch.tensor(float(self._pose_pool_ready_for_pool_modes()), device=self.device),
+            'rpy_throttle_reach/pool_ready_insert_count': torch.tensor(float(self.pose_pool_ready_insert_count), device=self.device),
+            'rpy_throttle_reach/sampled_level_mean': self.sampled_level.float().mean(),
             'rpy_throttle_reach/attitude_error_mean': mean_att.mean(),
             'rpy_throttle_reach/yaw_error_mean': mean_yaw.mean(),
             'rpy_throttle_reach/throttle_error_mean': mean_thr.mean(),
@@ -994,5 +1076,7 @@ class RPYThrottleReachTask(BaseTask):
         metrics['rpy_throttle_reach/transition_cosine_fraction'] = (
             self.command_profile == 3).float().mean()
         for key, value in self.last_reward_terms.items():
+            metrics[f'rpy_throttle_reach/{key}'] = value
+        for key, value in self.last_constraint_terms.items():
             metrics[f'rpy_throttle_reach/{key}'] = value
         return metrics

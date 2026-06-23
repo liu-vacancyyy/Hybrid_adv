@@ -72,7 +72,6 @@ num_observation: 30
 altitude_limit: 0.2
 acceleration_limit: 12.0         # wind-aware RC task: avoid killing normal early transients
 max_velocity: 10             # LearningToFly high-speed guard
-max_y_velocity: 2            # legacy field; HighSpeed only checks total speed now
 min_alpha: -10
 max_alpha: 20
 min_beta: -15
@@ -88,8 +87,10 @@ action_filter_alpha: 0.25    # filtered = 0.75 * previous_action + 0.25 * curren
 
 # Sensor noise follows HoverTask's convention: add zero-mean noise to physical
 # sensor variables before normalization. get_clean_obs(env) bypasses it.
+# LearningToFly uses no position/altitude white noise; keep altitude noise small
+# for low-altitude hover instead of the earlier 1 m value.
 enable_sensor_noise: true
-sensor_pos_std:   1.0       # m      altitude channel in rc_human
+sensor_pos_std:   0.02      # m      altitude channel in rc_human
 sensor_vel_std:   0.02      # m/s    zero-mean velocity / airspeed observation noise
 sensor_att_std:   0.005     # rad    roll / pitch / yaw
 sensor_omega_std: 0.0005    # rad/s  body angular rate
@@ -121,10 +122,10 @@ rc_human_vx_forward_medium_max: 3.0
 rc_human_mode_order: "0 1 2 5 3 4"
 rc_human_levels_per_mode: 20
 rc_human_max_mode_slots: 6
-rc_human_mix_current: 0.50
-rc_human_mix_easy_replay: 0.20
-rc_human_mix_medium_replay: 0.20
-rc_human_mix_random_replay: 0.10
+rc_human_mix_current: 0.35
+rc_human_mix_easy_replay: 0.25
+rc_human_mix_medium_replay: 0.25
+rc_human_mix_random_replay: 0.15
 rc_human_easy_stick: 0.25
 rc_human_medium_stick: 0.65
 rc_human_hard_stick: 1.0
@@ -145,6 +146,9 @@ rc_human_success_yaw_error: 0.30
 rc_human_success_attitude_error: 0.35
 rc_human_success_ignore_transient: true       # curriculum success metrics skip command-transition steps
 rc_human_tracking_bad_done_enable: true
+rc_human_vxyvz_dynamic_bad_done_enable: false # terminate if |vx/vy/vz error| exceeds |target - initial| + margin
+rc_human_vxyvz_dynamic_bad_done_margin: 0.5   # m/s extra tolerance beyond initial-to-target velocity gap
+rc_human_yaw_reward_enable: true              # keep yaw hold reward separate from curriculum yaw success checks
 rc_human_bad_done_yaw_error_deg: 20.0
 rc_human_bad_done_axis_vel_error: 0.5
 rc_human_bad_done_vx_error_min: 0.75
@@ -163,11 +167,24 @@ rc_human_w_yaw: 3.0
 rc_human_w_attitude: 1.8
 rc_human_w_omega: 1.0
 rc_human_w_smooth: 0.0       # disabled for LCP training; keep code path for ablations
+rc_human_w_vel_precision: 0.0 # optional normalized L1 term for near-target velocity accuracy
+rc_human_w_yaw_precision: 0.0 # optional normalized L1 term for yaw target/delta accuracy
+rc_human_rel_error_fixed_scale: 0.0 # m/s; >0 uses this fixed denominator for all vx/vy/vz relative terms
+rc_human_rel_error_floor: 0.20 # m/s denominator floor for relative velocity-error shaping
+rc_human_w_rel_tracking: 0.0   # Simulink-style linear relative tracking penalty
+rc_human_w_rel_precision: 0.0  # Simulink-style exponential near-target precision bonus
+rc_human_rel_precision_gain: 6.0
+rc_human_w_overshoot: 0.0
+rc_human_overshoot_deadband: 0.05
+rc_human_w_adaptive_damping: 0.0
+rc_human_adaptive_damping_gain: 4.0
+rc_human_yaw_reward_mode: target # target: heading-target_heading; delta: heading-heading_prev
 rc_human_sig_vel: 0.45
 rc_human_sig_vx: 0.90
 rc_human_sig_vy: 0.45
 rc_human_sig_vz: 0.45
 rc_human_sig_yaw: 0.12
+rc_human_sig_yaw_delta: 0.015
 rc_human_sig_attitude: 0.12
 rc_human_sig_omega: 1.0
 rc_human_sig_smooth: 0.7     # unused when rc_human_w_smooth is 0

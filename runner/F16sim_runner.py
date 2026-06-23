@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import csv
+import math
 import torch
 import logging
 import numpy as np
@@ -19,6 +21,8 @@ def _t2n(x):
 class F16SimRunner(Runner):
 
     def load(self):
+        if self.all_args.algorithm_name == 'cpo':
+            self.all_args.use_cost_constraints = True
         self.obs_space = self.envs.observation_space
         self.act_space = self.envs.action_space
         self.num_agents = self.envs.agents
@@ -34,6 +38,10 @@ class F16SimRunner(Runner):
             self.restore()
         if getattr(self.all_args, 'init_actor_ckpt', None):
             self._init_actor_from_checkpoint(self.all_args.init_actor_ckpt)
+        self._best_average_reward = -float("inf")
+        self._best_tracking_error = float("inf")
+        self._best_bad_done_fraction = float("inf")
+        self._progress_csv_header_written = False
 
     def _init_actor_from_checkpoint(self, ckpt_path):
         state = torch.load(ckpt_path, map_location=self.device)
@@ -57,7 +65,9 @@ class F16SimRunner(Runner):
             # profile.enable()
             for step in range(self.buffer_size):
                 # Sample actions，从PPO算法中获取动作与价值
-                values, actions, hybrid_actions, action_log_probs, rnn_states_actor, rnn_states_critic = self.collect(step)
+                values, actions, hybrid_actions, action_log_probs, \
+                    rnn_states_actor, rnn_states_critic, cost_values, \
+                    rnn_states_cost_critic = self.collect(step)
                 
                 # print('net output actions=', actions[0], action_log_probs[0])
 
@@ -71,7 +81,12 @@ class F16SimRunner(Runner):
                 #     if 'heading_turn_counts' in info:
                 #         heading_turns_list.append(info['heading_turn_counts'])
 
-                data = obs, actions, rewards, dones, bad_dones, exceed_time_limits, action_log_probs, values, rnn_states_actor, rnn_states_critic
+                costs = bad_dones.astype(np.float32)
+                data = (
+                    obs, actions, rewards, dones, bad_dones, exceed_time_limits,
+                    action_log_probs, values, rnn_states_actor, rnn_states_critic,
+                    costs, cost_values, rnn_states_cost_critic,
+                )
 
                 # insert data into buffer
                 self.insert(data)
@@ -93,16 +108,6 @@ class F16SimRunner(Runner):
             # log information
             if episode % self.log_interval == 0:
                 end = time.time()
-                logging.info("\n Scenario {} Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n"
-                             .format(self.all_args.scenario_name,
-                                     self.algorithm_name,
-                                     self.experiment_name,
-                                     episode,
-                                     episodes,
-                                     self.total_num_steps,
-                                     self.num_env_steps,
-                                     int(self.total_num_steps / (end - start))))
-
                 completed_episodes = ((self.buffer.masks[1:] == False).sum()
                                       + (self.buffer.bad_masks[1:] == False).sum())
                 completed_episodes = completed_episodes.item()
@@ -123,7 +128,11 @@ class F16SimRunner(Runner):
                 else:
                     train_infos["rollout/bad_done_fraction"] = 0.0
                 self._append_task_train_infos(train_infos)
-                logging.info("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
+                elapsed = end - start
+                fps = int(self.total_num_steps / max(elapsed, 1e-6))
+                self._update_best_train_infos(train_infos)
+                self._log_train_summary(train_infos, episode, episodes, elapsed, fps)
+                self._append_progress_csv(train_infos, episode, episodes, elapsed, fps)
 
                 # if len(heading_turns_list):
                 #     train_infos["average_heading_turns"] = np.mean(heading_turns_list)
@@ -148,6 +157,196 @@ class F16SimRunner(Runner):
             if torch.is_tensor(value):
                 value = value.detach().float().mean().item()
             train_infos[key] = value
+
+    def _as_float(self, infos, key, default=None):
+        if key not in infos:
+            return default
+        value = infos[key]
+        if torch.is_tensor(value):
+            value = value.detach().float().mean().item()
+        elif isinstance(value, np.ndarray):
+            value = float(np.mean(value))
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _fmt(self, value, precision=3, default="n/a"):
+        if value is None:
+            return default
+        if not math.isfinite(float(value)):
+            return default
+        return f"{float(value):.{precision}f}"
+
+    def _fmt_deg(self, value_rad, precision=1, default="n/a"):
+        if value_rad is None:
+            return default
+        return self._fmt(float(value_rad) * 180.0 / math.pi, precision, default)
+
+    def _update_best_train_infos(self, infos):
+        avg_reward = self._as_float(infos, "average_episode_rewards")
+        if avg_reward is not None and avg_reward > self._best_average_reward:
+            self._best_average_reward = avg_reward
+
+        tracking_error = self._as_float(
+            infos, "rc_human/tracking_vel_error_mean",
+            self._as_float(infos, "rc_human/tracking_error_mean"),
+        )
+        bad_done_fraction = self._as_float(infos, "rollout/bad_done_fraction")
+        if (
+            tracking_error is not None
+            and bad_done_fraction is not None
+            and bad_done_fraction <= 0.0
+            and tracking_error < self._best_tracking_error
+        ):
+            self._best_tracking_error = tracking_error
+            self._best_bad_done_fraction = bad_done_fraction
+
+    def _nonzero_mode_summary(self, infos):
+        parts = []
+        for mode_id in range(10):
+            key = f"rc_human/mode_{mode_id}_fraction"
+            frac = self._as_float(infos, key)
+            if frac is not None and frac > 1e-3:
+                parts.append(f"m{mode_id}:{frac:.2f}")
+        return " ".join(parts) if parts else "n/a"
+
+    def _log_train_summary(self, infos, episode, episodes, elapsed, fps):
+        avg_reward = self._as_float(infos, "average_episode_rewards")
+        total_reward = self._as_float(infos, "reward/total_mean")
+        clean_done = self._as_float(infos, "rollout/clean_done_count", 0.0)
+        bad_done = self._as_float(infos, "rollout/bad_done_count", 0.0)
+        bad_done_fraction = self._as_float(infos, "rollout/bad_done_fraction", 0.0)
+
+        vel_err = self._as_float(
+            infos, "rc_human/tracking_vel_error_mean",
+            self._as_float(infos, "rc_human/tracking_error_mean"),
+        )
+        yaw_err = self._as_float(infos, "rc_human/tracking_yaw_error_mean")
+        att_err = self._as_float(infos, "rc_human/tracking_attitude_error_mean")
+        valid_frac = self._as_float(infos, "rc_human/success_metric_valid_fraction")
+        skipped_frac = self._as_float(infos, "rc_human/success_metric_skipped_fraction")
+
+        level_mean = self._as_float(infos, "rc_human/curriculum_level_mean")
+        level_max = self._as_float(infos, "rc_human/curriculum_level_max")
+        level_limit = self._as_float(infos, "rc_human/curriculum_level_limit")
+        transient = self._as_float(infos, "rc_human/command_transient_fraction")
+        rate_limited = self._as_float(infos, "rc_human/command_rate_limited_fraction")
+        raw_delta = self._as_float(infos, "rc_human/command_raw_delta_mean")
+
+        policy_loss = self._as_float(infos, "policy_loss")
+        value_loss = self._as_float(infos, "value_loss")
+        entropy_loss = self._as_float(infos, "policy_entropy_loss")
+        ratio = self._as_float(infos, "ratio")
+        approx_kl = self._as_float(infos, "approx_kl")
+        actor_grad = self._as_float(infos, "actor_grad_norm")
+        critic_grad = self._as_float(infos, "critic_grad_norm")
+        skipped_updates = self._as_float(infos, "skipped_updates", 0.0)
+
+        reward_terms = []
+        for key, label in [
+            ("reward/vel_gaussian_mean", "vel"),
+            ("reward/rel_tracking_mean", "rel"),
+            ("reward/rel_precision_mean", "prec"),
+            ("reward/yaw_mean", "yaw"),
+            ("reward/yaw_precision_mean", "yawP"),
+            ("reward/yaw_rate_mean", "yawR"),
+            ("reward/attitude_mean", "att"),
+            ("reward/omega_mean", "omega"),
+            ("reward/smooth_mean", "smooth"),
+            ("reward/overshoot_mean", "over"),
+            ("reward/adaptive_damping_mean", "damp"),
+        ]:
+            value = self._as_float(infos, key)
+            if value is not None:
+                reward_terms.append(f"{label}={value:.3f}")
+
+        logging.info(
+            "\n"
+            f"[train] scenario={self.all_args.scenario_name} algo={self.algorithm_name} "
+            f"exp={self.experiment_name}\n"
+            f"        update={episode}/{episodes} steps={self.total_num_steps}/{self.num_env_steps} "
+            f"fps={fps} elapsed={elapsed/60.0:.1f}min\n"
+            f"        reward avg_ep={self._fmt(avg_reward, 2)} total_step={self._fmt(total_reward, 3)} "
+            f"best_avg_ep={self._fmt(self._best_average_reward, 2)}\n"
+            f"        tracking vel={self._fmt(vel_err, 4)}m/s yaw={self._fmt_deg(yaw_err)}deg "
+            f"att={self._fmt_deg(att_err)}deg valid={self._fmt(valid_frac, 2)} "
+            f"skipped={self._fmt(skipped_frac, 2)}\n"
+            f"        done clean={int(clean_done)} bad={int(bad_done)} "
+            f"bad_frac={self._fmt(bad_done_fraction, 3)} "
+            f"best_clean_vel={self._fmt(self._best_tracking_error, 4)}\n"
+            f"        curriculum level={self._fmt(level_mean, 1)}/{self._fmt(level_limit, 0)} "
+            f"max={self._fmt(level_max, 0)} modes=[{self._nonzero_mode_summary(infos)}]\n"
+            f"        command transient={self._fmt(transient, 2)} rate_limited={self._fmt(rate_limited, 2)} "
+            f"raw_delta={self._fmt(raw_delta, 3)}\n"
+            f"        ppo policy={self._fmt(policy_loss, 4)} value={self._fmt(value_loss, 4)} "
+            f"entropy={self._fmt(entropy_loss, 4)} ratio={self._fmt(ratio, 3)} "
+            f"kl={self._fmt(approx_kl, 5)} gradA={self._fmt(actor_grad, 2)} "
+            f"gradC={self._fmt(critic_grad, 2)} skipped={self._fmt(skipped_updates, 2)}"
+        )
+        if reward_terms:
+            logging.info("        reward_terms " + " ".join(reward_terms))
+
+        if "constraint/episode_cost" in infos:
+            logging.info(
+                "        constraint cost={} limit={} lagrange={}->{}".format(
+                    self._fmt(self._as_float(infos, "constraint/episode_cost"), 4),
+                    self._fmt(self._as_float(infos, "constraint/cost_limit"), 4),
+                    self._fmt(self._as_float(infos, "constraint/lagrange_before_update"), 3),
+                    self._fmt(self._as_float(infos, "constraint/lagrange_after_update"), 3),
+                )
+            )
+
+    def _append_progress_csv(self, infos, episode, episodes, elapsed, fps):
+        csv_path = Path(self.run_dir) / "training_progress.csv"
+        fields = [
+            "update", "updates_total", "steps", "fps", "elapsed_s",
+            "average_episode_rewards", "reward/total_mean",
+            "rollout/clean_done_count", "rollout/bad_done_count",
+            "rollout/bad_done_fraction",
+            "rc_human/curriculum_level_mean", "rc_human/curriculum_level_max",
+            "rc_human/curriculum_level_limit",
+            "rc_human/tracking_vel_error_mean", "rc_human/tracking_error_mean",
+            "rc_human/tracking_yaw_error_mean", "rc_human/tracking_attitude_error_mean",
+            "rc_human/success_metric_valid_fraction",
+            "rc_human/success_metric_skipped_fraction",
+            "rc_human/command_transient_fraction",
+            "rc_human/command_rate_limited_fraction",
+            "rc_human/command_raw_delta_mean",
+            "reward/vel_gaussian_mean", "reward/rel_tracking_mean",
+            "reward/rel_precision_mean", "reward/yaw_mean",
+            "reward/yaw_precision_mean", "reward/yaw_rate_mean",
+            "reward/attitude_mean", "reward/omega_mean",
+            "reward/smooth_mean", "reward/overshoot_mean",
+            "reward/adaptive_damping_mean",
+            "policy_loss", "value_loss", "policy_entropy_loss",
+            "ratio", "approx_kl", "actor_grad_norm",
+            "critic_grad_norm", "skipped_updates",
+            "constraint/episode_cost", "constraint/cost_limit",
+            "constraint/lagrange_before_update", "constraint/lagrange_after_update",
+        ]
+        for mode_id in range(10):
+            fields.append(f"rc_human/mode_{mode_id}_fraction")
+
+        row = {
+            "update": episode,
+            "updates_total": episodes,
+            "steps": self.total_num_steps,
+            "fps": fps,
+            "elapsed_s": elapsed,
+        }
+        for field in fields:
+            if field in row:
+                continue
+            value = self._as_float(infos, field)
+            row[field] = "" if value is None else value
+
+        need_header = not csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if need_header:
+                writer.writeheader()
+            writer.writerow(row)
                 
 
     def warmup(self):
@@ -176,6 +375,13 @@ class F16SimRunner(Runner):
         masks = np.concatenate(self.buffer.masks[step])
         values, actions, action_log_probs, rnn_states_actor, rnn_states_critic \
             = self.policy.get_actions(obs, rnn_actor, rnn_critic, masks)
+        cost_values = None
+        rnn_states_cost_critic = None
+        if getattr(self.all_args, 'use_cost_constraints', False):
+            rnn_cost_critic = np.concatenate(self.buffer.rnn_states_cost_critic[step])
+            cost_values, rnn_states_cost_critic = self.policy.get_cost_values(
+                obs, rnn_cost_critic, masks
+            )
         rollout_actions = actions
         recompute_action_log_probs = False
         #可以在此处测试各种添加扰动的算法，并将noise=‘新增的扰动’
@@ -208,10 +414,21 @@ class F16SimRunner(Runner):
         action_log_probs = np.array(np.split(_t2n(action_log_probs), self.n_rollout_threads))
         rnn_states_actor = np.array(np.split(_t2n(rnn_states_actor), self.n_rollout_threads))
         rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
-        return values, actions, rollout_actions, action_log_probs, rnn_states_actor, rnn_states_critic
+        if getattr(self.all_args, 'use_cost_constraints', False):
+            cost_values = np.array(np.split(_t2n(cost_values), self.n_rollout_threads))
+            rnn_states_cost_critic = np.array(np.split(
+                _t2n(rnn_states_cost_critic), self.n_rollout_threads
+            ))
+        return (
+            values, actions, rollout_actions, action_log_probs,
+            rnn_states_actor, rnn_states_critic,
+            cost_values, rnn_states_cost_critic,
+        )
 
     def insert(self, data: List[np.ndarray]):
-        obs, actions, rewards, dones, bad_dones, exceed_time_limits, action_log_probs, values, rnn_states_actor, rnn_states_critic = data
+        obs, actions, rewards, dones, bad_dones, exceed_time_limits, action_log_probs, \
+            values, rnn_states_actor, rnn_states_critic, costs, cost_values, \
+            rnn_states_cost_critic = data
 
         dones_env = np.any(dones.squeeze(axis=-1), axis=-1)
         bad_dones_env = np.any(bad_dones.squeeze(axis=-1), axis=-1)
@@ -219,6 +436,11 @@ class F16SimRunner(Runner):
 
         rnn_states_actor[reset_env == True] = np.zeros(((reset_env == True).sum(), *rnn_states_actor.shape[1:]), dtype=np.float32)
         rnn_states_critic[reset_env == True] = np.zeros(((reset_env == True).sum(), *rnn_states_critic.shape[1:]), dtype=np.float32)
+        if getattr(self.all_args, 'use_cost_constraints', False):
+            rnn_states_cost_critic[reset_env == True] = np.zeros(
+                ((reset_env == True).sum(), *rnn_states_cost_critic.shape[1:]),
+                dtype=np.float32,
+            )
 
         masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         masks[dones_env == True] = np.zeros(((dones_env == True).sum(), self.num_agents, 1), dtype=np.float32)
@@ -241,7 +463,13 @@ class F16SimRunner(Runner):
         # print('max_yaw,max_pitch:',self.envs.gpu_vec_env.task.max_yaw[0],self.envs.gpu_vec_env.task.max_pitch[0])
         # print('maxdis:',self.envs.gpu_vec_env.task.max_distance[0])
 
-        self.buffer.insert(obs, actions, rewards, masks, action_log_probs, values, rnn_states_actor, rnn_states_critic, bad_masks)
+        self.buffer.insert(
+            obs, actions, rewards, masks, action_log_probs, values,
+            rnn_states_actor, rnn_states_critic, bad_masks,
+            costs=costs,
+            cost_value_preds=cost_values,
+            rnn_states_cost_critic=rnn_states_cost_critic,
+        )
 
     @torch.no_grad()
     def eval(self, total_num_steps):
@@ -319,3 +547,8 @@ class F16SimRunner(Runner):
         torch.save(policy_actor_state_dict, str(save_dir) + '/actor_latest.ckpt')
         policy_critic_state_dict = self.policy.critic.state_dict()
         torch.save(policy_critic_state_dict, str(save_dir) + '/critic_latest.ckpt')
+        if getattr(self.policy, 'cost_critic', None) is not None:
+            torch.save(
+                self.policy.cost_critic.state_dict(),
+                str(save_dir) + '/cost_critic_latest.ckpt',
+            )

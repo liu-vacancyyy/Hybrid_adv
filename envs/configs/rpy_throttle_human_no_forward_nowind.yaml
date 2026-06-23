@@ -60,8 +60,6 @@ altitude_limit: 0.5
 acceleration_limit: 12.0
 overload_bad_done_persist_steps: 3
 max_velocity: 10
-max_y_velocity: 2
-max_body_y_velocity: 2.0
 min_alpha: -10
 max_alpha: 20
 min_beta: -15
@@ -110,6 +108,7 @@ rpy_throttle_success_attitude_error: 0.05236
 rpy_throttle_success_yaw_rate_error: 0.12
 rpy_throttle_success_throttle_error: 0.08
 rpy_throttle_success_overshoot: 0.20
+rpy_throttle_success_ignore_transient: true
 
 # Safety command override. When the aircraft approaches the bad_done envelope,
 # pause human/random sticks and command level hover until the state is stable
@@ -156,6 +155,7 @@ rc_human_mode5_hold_min_steps: 75
 rc_human_mode5_hold_max_steps: 250
 rc_human_mode5_release_recovery_steps: 150
 rc_human_success_ignore_transient: true
+rc_human_tracking_bad_done_enable: false
 rc_human_alt_high: 95.0
 rc_human_alt_low: 5.0
 

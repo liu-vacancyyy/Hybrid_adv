@@ -21,7 +21,7 @@ from envs.control_env import ControlEnv        # noqa: E402
 
 
 class ActorArgs:
-    def __init__(self, args, device):
+    def __init__(self, args, device, use_safety_aux=False):
         self.gain = args.gain
         self.hidden_size = args.hidden_size
         self.act_hidden_size = args.act_hidden_size
@@ -30,6 +30,7 @@ class ActorArgs:
         self.use_recurrent_policy = args.use_recurrent_policy
         self.recurrent_hidden_size = args.recurrent_hidden_size
         self.recurrent_hidden_layers = args.recurrent_hidden_layers
+        self.use_safety_aux = use_safety_aux
         self.tpdv = dict(dtype=torch.float32, device=device)
         self.use_prior = False
 
@@ -47,6 +48,8 @@ def parse_args():
     p.add_argument("--min-level", type=int, default=0)
     p.add_argument("--max-level", type=int, default=119)
     p.add_argument("--max-steps", type=int, default=1500)
+    p.add_argument("--pool-warmup-steps", type=int, default=0,
+                   help="For rpy_throttle_reach, run mode0-4 first to fill the in-process pose pool.")
     p.add_argument("--mode-order", default="0 1 2 3 4 5")
     p.add_argument("--deterministic", action="store_true", default=True)
     p.add_argument("--save-per-level-plots", action="store_true")
@@ -88,9 +91,17 @@ def wrap_pi(x):
 
 
 def load_actor(env, args, device):
-    actor = PPOActor(ActorArgs(args, device), env.observation_space, env.action_space, device)
     state = torch.load(args.ckpt_path, map_location=device)
-    actor.load_state_dict(state)
+    use_safety_aux = any(k.startswith("safety_out.") for k in state.keys())
+    actor = PPOActor(
+        ActorArgs(args, device, use_safety_aux=use_safety_aux),
+        env.observation_space,
+        env.action_space,
+        device,
+    )
+    missing, unexpected = actor.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        print(f"[load_actor] missing={missing} unexpected={unexpected}")
     actor.eval()
     return actor
 
@@ -107,7 +118,14 @@ def set_fixed_levels(task, levels):
     task.mix_random = 0.0
 
 
+def is_reach_task(task):
+    return getattr(task, "task_name", "") == "rpy_throttle_reach"
+
+
 def resample_current_commands(task, env):
+    if not hasattr(task, "_resample_raw_sticks"):
+        task.sync_command(env)
+        return
     mask = torch.ones(task.n, dtype=torch.bool, device=task.device)
     task._resample_raw_sticks(mask)
     task._update_px4_vtol_mc_targets_from_sticks(mask, env)
@@ -128,9 +146,42 @@ def apply_action_constraints(action, model_name):
     return action
 
 
+def warmup_pose_pool(env, actor, args, device):
+    if (not is_reach_task(env.task)) or args.pool_warmup_steps <= 0:
+        return
+    print(f"[warmup] filling reach pose pool for {args.pool_warmup_steps} steps")
+    env.task.curriculum_enable = False
+    env.task.uniform_mode_when_no_curriculum = True
+    obs = env.reset()
+    rnn = torch.zeros(
+        (env.n, args.recurrent_hidden_layers, args.recurrent_hidden_size),
+        device=device,
+    )
+    masks = torch.ones(env.n, 1, device=device)
+    for step in range(args.pool_warmup_steps):
+        with torch.no_grad():
+            action, _, rnn = actor(obs, rnn, masks, deterministic=args.deterministic)
+        action = apply_action_constraints(action, args.model_name)
+        obs, _reward, _done, _bad_done, _exceed, _info = env.step(action)
+        if step % 250 == 0:
+            print(
+                "[warmup] "
+                f"step={step:04d} pool_valid={int(env.task.pose_pool_valid_count)} "
+                f"pool_insert={int(env.task.pose_pool_insert_count)}"
+            )
+    print(
+        "[warmup] done "
+        f"pool_valid={int(env.task.pose_pool_valid_count)} "
+        f"pool_insert={int(env.task.pose_pool_insert_count)}"
+    )
+    env.is_done[:] = True
+    env.bad_done[:] = False
+    env.exceed_time_limit[:] = False
+
+
 def collect_arrays(env, obs, reward, action, prev_action):
     task = env.task
-    roll, pitch, heading = env.model.get_posture()
+    roll, pitch, yaw = env.model.get_posture()
     roll_dot, pitch_dot, yaw_rate = env.model.get_euler_angular_velocity()
     p, q, r = env.model.get_angular_velocity()
     _npos, _epos, altitude = env.model.get_position()
@@ -146,22 +197,61 @@ def collect_arrays(env, obs, reward, action, prev_action):
 
     roll_error = wrap_pi(roll - task.target_roll)
     pitch_error = wrap_pi(pitch - task.target_pitch)
-    yaw_rate_error = yaw_rate - task.target_yaw_rate
+    if is_reach_task(task):
+        target_yaw = task.target_yaw
+        yaw_error = wrap_pi(yaw - target_yaw)
+        target_yaw_rate = torch.zeros_like(yaw_rate)
+        yaw_rate_error = yaw_error
+        yaw_metric_name = "yaw_error"
+    else:
+        target_yaw = yaw
+        yaw_error = yaw_rate - task.target_yaw_rate
+        target_yaw_rate = task.target_yaw_rate
+        yaw_rate_error = yaw_error
+        yaw_metric_name = "yaw_rate_error"
     throttle_frac = (collective - hover) / hover
     throttle_error = (collective - task.target_collective) / hover
     attitude_error = torch.sqrt(roll_error * roll_error + pitch_error * pitch_error)
     overshoot = task.compute_overshoot_score(
-        roll_error, pitch_error, yaw_rate_error, throttle_error
+        roll_error, pitch_error, yaw_error, throttle_error
     )
     moving_away = (
         torch.relu(roll_error * roll_dot)
         + torch.relu(pitch_error * pitch_dot)
-        + torch.relu(yaw_rate_error * yaw_rate)
+        + torch.relu(yaw_error * yaw_rate)
     )
     if prev_action is None:
         action_delta = torch.zeros(env.n, device=env.device)
     else:
         action_delta = torch.mean(torch.abs(action - prev_action), dim=1)
+
+    final_roll = getattr(task, "final_roll", task.target_roll)
+    final_pitch = getattr(task, "final_pitch", task.target_pitch)
+    final_yaw = getattr(task, "final_yaw", target_yaw)
+    final_throttle_frac = getattr(task, "final_throttle_frac", task.target_throttle_frac)
+    start_roll = getattr(task, "start_roll", roll)
+    start_pitch = getattr(task, "start_pitch", pitch)
+    start_yaw = getattr(task, "start_yaw", yaw)
+    start_throttle_frac = getattr(task, "start_throttle_frac", throttle_frac)
+    raw_pitch = getattr(task, "raw_vx", final_pitch)
+    raw_roll = getattr(task, "raw_vy", final_roll)
+    raw_throttle = getattr(task, "raw_vz", final_throttle_frac)
+    raw_yaw = getattr(task, "raw_yaw", wrap_pi(final_yaw - start_yaw))
+    stick_pitch = getattr(task, "stick_vx", task.target_pitch)
+    stick_roll = getattr(task, "stick_vy", task.target_roll)
+    stick_throttle = getattr(task, "stick_vz", task.target_throttle_frac)
+    stick_yaw = getattr(task, "stick_yaw", wrap_pi(target_yaw - start_yaw))
+    command_profile = getattr(task, "command_profile", torch.zeros(env.n, device=env.device))
+    if hasattr(task, "command_ramp_steps"):
+        elapsed = (env.step_count.long() - task.command_start_step).float()
+        raw_phase = torch.clamp(
+            elapsed / torch.clamp(task.command_ramp_steps.float(), min=1.0),
+            0.0,
+            1.0,
+        )
+        ramp_phase = task._command_phase(raw_phase, command_profile)
+    else:
+        ramp_phase = torch.ones(env.n, device=env.device)
 
     obs_np = tensor_np(obs)
     arrays = {
@@ -170,8 +260,10 @@ def collect_arrays(env, obs, reward, action, prev_action):
         "target_roll_deg": np.degrees(tensor_np(task.target_roll)),
         "pitch_deg": np.degrees(tensor_np(pitch)),
         "target_pitch_deg": np.degrees(tensor_np(task.target_pitch)),
+        "yaw_deg": np.degrees(tensor_np(yaw)),
+        "target_yaw_deg": np.degrees(tensor_np(target_yaw)),
         "yaw_rate": tensor_np(yaw_rate),
-        "target_yaw_rate": tensor_np(task.target_yaw_rate),
+        "target_yaw_rate": tensor_np(target_yaw_rate),
         "throttle_frac": tensor_np(throttle_frac),
         "target_throttle_frac": tensor_np(task.target_throttle_frac),
         "collective": tensor_np(collective),
@@ -180,7 +272,9 @@ def collect_arrays(env, obs, reward, action, prev_action):
         "roll_error_deg": np.degrees(tensor_np(roll_error)),
         "pitch_error_deg": np.degrees(tensor_np(pitch_error)),
         "attitude_error_deg": np.degrees(tensor_np(attitude_error)),
+        "yaw_error_deg": np.degrees(tensor_np(yaw_error)),
         "yaw_rate_error": tensor_np(yaw_rate_error),
+        "yaw_metric": tensor_np(yaw_error),
         "throttle_error": tensor_np(throttle_error),
         "overshoot": tensor_np(overshoot),
         "moving_away": tensor_np(moving_away),
@@ -197,14 +291,25 @@ def collect_arrays(env, obs, reward, action, prev_action):
         "p": tensor_np(p),
         "q": tensor_np(q),
         "r": tensor_np(r),
-        "raw_pitch": tensor_np(task.raw_vx),
-        "raw_roll": tensor_np(task.raw_vy),
-        "raw_throttle": tensor_np(task.raw_vz),
-        "raw_yaw": tensor_np(task.raw_yaw),
-        "stick_pitch": tensor_np(task.stick_vx),
-        "stick_roll": tensor_np(task.stick_vy),
-        "stick_throttle": tensor_np(task.stick_vz),
-        "stick_yaw": tensor_np(task.stick_yaw),
+        "yaw_metric_name_id": np.full(env.n, 1.0 if yaw_metric_name == "yaw_error" else 0.0),
+        "raw_pitch": tensor_np(raw_pitch),
+        "raw_roll": tensor_np(raw_roll),
+        "raw_throttle": tensor_np(raw_throttle),
+        "raw_yaw": tensor_np(raw_yaw),
+        "stick_pitch": tensor_np(stick_pitch),
+        "stick_roll": tensor_np(stick_roll),
+        "stick_throttle": tensor_np(stick_throttle),
+        "stick_yaw": tensor_np(stick_yaw),
+        "final_roll_deg": np.degrees(tensor_np(final_roll)),
+        "final_pitch_deg": np.degrees(tensor_np(final_pitch)),
+        "final_yaw_deg": np.degrees(tensor_np(final_yaw)),
+        "final_throttle_frac": tensor_np(final_throttle_frac),
+        "start_roll_deg": np.degrees(tensor_np(start_roll)),
+        "start_pitch_deg": np.degrees(tensor_np(start_pitch)),
+        "start_yaw_deg": np.degrees(tensor_np(start_yaw)),
+        "start_throttle_frac": tensor_np(start_throttle_frac),
+        "command_profile": tensor_np(command_profile.float()),
+        "ramp_phase": tensor_np(ramp_phase),
         "safety_override": tensor_np(
             getattr(
                 task,
@@ -247,11 +352,6 @@ def infer_bad_reasons(last_row, config):
         reasons.append("max_omega_norm")
     if abs(last_row["vt"]) >= float(getattr(config, "max_velocity", 10)):
         reasons.append("high_speed")
-    max_body_y_velocity = float(getattr(
-        config, "max_body_y_velocity", getattr(config, "max_y_velocity", 2)
-    ))
-    if abs(last_row.get("body_v", 0.0)) > max_body_y_velocity:
-        reasons.append("body_side_velocity")
     return "+".join(reasons) if reasons else "unknown"
 
 
@@ -273,6 +373,7 @@ def run_eval(args, device):
     seed_everything(args.seed)
     os.environ["RPY_THROTTLE_MODE_ORDER"] = args.mode_order
     os.environ["RPY_THROTTLE_MAX_MODE_SLOTS"] = str(len(args.mode_order.split()))
+    os.environ["RPY_THROTTLE_REACH_MAX_MODE_SLOTS"] = str(len(args.mode_order.split()))
 
     levels = np.arange(args.min_level, args.max_level + 1, dtype=np.int64)
     levels_np = np.repeat(levels, args.episodes_per_level)
@@ -287,6 +388,7 @@ def run_eval(args, device):
         device=device,
     )
     actor = load_actor(env, args, device)
+    warmup_pose_pool(env, actor, args, device)
     set_fixed_levels(env.task, level_tensor)
     obs = env.reset()
     set_fixed_levels(env.task, level_tensor)
@@ -356,6 +458,7 @@ def summarize_trace(trace, term_type, bad_reason):
         "attitude_error_deg": float(np.mean(np.abs(arr("attitude_error_deg")))),
         "roll_error_deg": float(np.mean(np.abs(arr("roll_error_deg")))),
         "pitch_error_deg": float(np.mean(np.abs(arr("pitch_error_deg")))),
+        "yaw_error_deg": float(np.mean(np.abs(arr("yaw_error_deg")))),
         "yaw_rate_error": float(np.mean(np.abs(arr("yaw_rate_error")))),
         "throttle_error": float(np.mean(np.abs(arr("throttle_error")))),
         "overshoot": float(np.mean(arr("overshoot"))),
@@ -380,7 +483,7 @@ def aggregate_rows(rows, key):
             row["level_max"] = max(r["level"] for r in items)
         for metric in [
             "return", "attitude_error_deg", "roll_error_deg", "pitch_error_deg",
-            "yaw_rate_error", "throttle_error", "overshoot", "moving_away",
+            "yaw_error_deg", "yaw_rate_error", "throttle_error", "overshoot", "moving_away",
             "safety_override_fraction", "action_delta_mean", "length", "success",
         ]:
             row[metric] = float(np.mean([r[metric] for r in items]))
@@ -423,7 +526,7 @@ def plot_summary(level_rows, out_png):
         ("return", "Return", ""),
         ("bad_done_rate", "Bad done rate", "rate"),
         ("attitude_error_deg", "Attitude error", "deg"),
-        ("yaw_rate_error", "Yaw-rate error", "rad/s"),
+        ("yaw_error_deg", "Yaw error", "deg"),
         ("throttle_error", "Throttle error", "frac"),
         ("overshoot", "Overshoot score", ""),
         ("moving_away", "Moving-away penalty source", ""),
@@ -471,10 +574,16 @@ def plot_trace(trace, out_png):
     ax.legend(fontsize=7, ncol=2)
 
     ax = axes[1]
-    ax.plot(t, [x["yaw_rate"] for x in trace], label="yaw rate")
-    ax.plot(t, [x["target_yaw_rate"] for x in trace], "--", label="target")
-    ax.set_title("Yaw-rate tracking")
-    ax.set_ylabel("rad/s")
+    if trace[0].get("yaw_metric_name_id", 0.0) > 0.5:
+        ax.plot(t, [x["yaw_deg"] for x in trace], label="yaw")
+        ax.plot(t, [x["target_yaw_deg"] for x in trace], "--", label="target yaw")
+        ax.set_title("Yaw tracking")
+        ax.set_ylabel("deg")
+    else:
+        ax.plot(t, [x["yaw_rate"] for x in trace], label="yaw rate")
+        ax.plot(t, [x["target_yaw_rate"] for x in trace], "--", label="target")
+        ax.set_title("Yaw-rate tracking")
+        ax.set_ylabel("rad/s")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7)
 
@@ -496,7 +605,10 @@ def plot_trace(trace, out_png):
 
     ax = axes[4]
     ax.plot(t, [x["attitude_error_deg"] for x in trace], label="att err")
-    ax.plot(t, [abs(x["yaw_rate_error"]) for x in trace], label="|yaw-rate err|")
+    if trace[0].get("yaw_metric_name_id", 0.0) > 0.5:
+        ax.plot(t, [abs(x["yaw_error_deg"]) for x in trace], label="|yaw err| deg")
+    else:
+        ax.plot(t, [abs(x["yaw_rate_error"]) for x in trace], label="|yaw-rate err|")
     ax.plot(t, [abs(x["throttle_error"]) for x in trace], label="|throttle err|")
     ax.set_title("Errors")
     ax.grid(alpha=0.3)

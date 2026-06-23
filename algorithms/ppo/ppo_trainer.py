@@ -25,13 +25,24 @@ class PPOTrainer():
         self.use_safety_aux = bool(getattr(args, 'use_safety_aux', False))
         self.safety_aux_loss_coef = float(getattr(args, 'safety_aux_loss_coef', 0.1))
         self.safety_aux_pos_weight = float(getattr(args, 'safety_aux_pos_weight', 5.0))
+        self.use_cost_constraints = (
+            bool(getattr(args, 'use_cost_constraints', False))
+            or getattr(args, 'algorithm_name', '') == 'cpo'
+        )
+        self.cost_limit = float(getattr(args, 'cost_limit', 0.02))
+        self.cost_lagrange = max(0.0, float(getattr(args, 'cost_lagrange_init', 1.0)))
+        self.cost_lagrange_lr = float(getattr(args, 'cost_lagrange_lr', 0.05))
+        self.cost_value_loss_coef = float(getattr(args, 'cost_value_loss_coef', 0.25))
         # rnn configs
         self.use_recurrent_policy = args.use_recurrent_policy
         self.data_chunk_length = args.data_chunk_length
 
     def _zero_update(self, reason=1.0):
         zero = torch.zeros((), device=self.device)
-        return zero, zero, zero, zero, zero, 0.0, 0.0, 0.0, reason, 0.0, 0.0, 0.0
+        return (
+            zero, zero, zero, zero, zero, zero, zero,
+            0.0, 0.0, 0.0, reason, 0.0, 0.0, 0.0,
+        )
 
     def _finite_tensors(self, *tensors):
         return all(torch.isfinite(tensor).all().item() for tensor in tensors)
@@ -41,15 +52,23 @@ class PPOTrainer():
 
     def ppo_update(self, policy: PPOPolicy, sample):
 
+        obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+            returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch = sample[:9]
+        cursor = 9
+
+        cost_advantages_batch = None
+        cost_returns_batch = None
+        cost_value_preds_batch = None
+        rnn_states_cost_critic_batch = None
+        if self.use_cost_constraints:
+            cost_advantages_batch, cost_returns_batch, cost_value_preds_batch, \
+                rnn_states_cost_critic_batch = sample[cursor:cursor + 4]
+            cursor += 4
+
         safety_targets_batch = None
         safety_valid_batch = None
-        if len(sample) == 11:
-            obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch, \
-                safety_targets_batch, safety_valid_batch = sample
-        else:
-            obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch = sample
+        if self.use_safety_aux:
+            safety_targets_batch, safety_valid_batch = sample[cursor:cursor + 2]
 
         obs_check = check(obs_batch).to(**self.tpdv)
         actions_check = check(actions_batch).to(**self.tpdv)
@@ -86,6 +105,8 @@ class PPOTrainer():
                 torch.zeros((), device=self.device),
                 torch.zeros((), device=self.device),
                 torch.zeros((), device=self.device),
+                torch.zeros((), device=self.device),
+                torch.zeros((), device=self.device),
                 ratio_for_log,
                 0.0,
                 0.0,
@@ -113,6 +134,41 @@ class PPOTrainer():
         value_loss = value_loss.mean()
 
         policy_entropy_loss = -dist_entropy.mean()
+        cost_policy_loss = torch.zeros((), device=self.device)
+        cost_value_loss = torch.zeros((), device=self.device)
+        if self.use_cost_constraints and cost_advantages_batch is not None:
+            cost_advantages_batch = check(cost_advantages_batch).to(**self.tpdv)
+            cost_returns_batch = check(cost_returns_batch).to(**self.tpdv)
+            cost_value_preds_batch = check(cost_value_preds_batch).to(**self.tpdv)
+            cost_values = policy.evaluate_cost_values(
+                obs_check,
+                rnn_states_cost_critic_batch,
+                masks_check,
+            )
+            if not self._finite_tensors(
+                    cost_advantages_batch, cost_returns_batch, cost_value_preds_batch,
+                    cost_values):
+                return self._zero_update()
+
+            cost_surr1 = ratio * cost_advantages_batch
+            cost_surr2 = (
+                torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+                * cost_advantages_batch
+            )
+            # Conservative clipped surrogate: minimize the larger estimated cost.
+            cost_policy_loss = torch.max(cost_surr1, cost_surr2).mean()
+
+            if self.use_clipped_value_loss:
+                cost_value_pred_clipped = cost_value_preds_batch + (
+                    cost_values - cost_value_preds_batch
+                ).clamp(-self.clip_param, self.clip_param)
+                cost_losses = (cost_values - cost_returns_batch).pow(2)
+                cost_losses_clipped = (cost_value_pred_clipped - cost_returns_batch).pow(2)
+                cost_value_loss = 0.5 * torch.max(cost_losses, cost_losses_clipped)
+            else:
+                cost_value_loss = 0.5 * (cost_returns_batch - cost_values).pow(2)
+            cost_value_loss = cost_value_loss.mean()
+
         safety_aux_loss = torch.zeros((), device=self.device)
         safety_aux_acc = 0.0
         safety_aux_pos_rate = 0.0
@@ -152,6 +208,8 @@ class PPOTrainer():
             + value_loss * self.value_loss_coef
             + policy_entropy_loss * self.entropy_coef
             + safety_aux_loss * self.safety_aux_loss_coef
+            + cost_policy_loss * self.cost_lagrange
+            + cost_value_loss * self.cost_value_loss_coef
         )
         if not torch.isfinite(loss).item():
             return self._zero_update()
@@ -160,21 +218,32 @@ class PPOTrainer():
         policy.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         actor_grads = [p.grad for p in policy.actor.parameters() if p.grad is not None]
-        critic_grads = [p.grad for p in policy.critic.parameters() if p.grad is not None]
+        critic_params = list(policy.critic.parameters())
+        if getattr(policy, 'cost_critic', None) is not None:
+            critic_params += list(policy.cost_critic.parameters())
+        critic_grads = [p.grad for p in critic_params if p.grad is not None]
         if not self._finite_tensors(*actor_grads, *critic_grads):
             policy.optimizer.zero_grad(set_to_none=True)
             return self._zero_update()
         if self.use_max_grad_norm:
             actor_grad_norm = nn.utils.clip_grad_norm_(policy.actor.parameters(), self.max_grad_norm).item()
-            critic_grad_norm = nn.utils.clip_grad_norm_(policy.critic.parameters(), self.max_grad_norm).item()
+            critic_grad_norm = nn.utils.clip_grad_norm_(critic_params, self.max_grad_norm).item()
         else:
             actor_grad_norm = get_gard_norm(policy.actor.parameters())
-            critic_grad_norm = get_gard_norm(policy.critic.parameters())
+            critic_grad_norm = get_gard_norm(critic_params)
         if not torch.isfinite(torch.tensor([actor_grad_norm, critic_grad_norm], device=self.device)).all().item():
             policy.optimizer.zero_grad(set_to_none=True)
             return self._zero_update()
         policy.optimizer.step()
-        if not (self._finite_parameters(policy.actor) and self._finite_parameters(policy.critic)):
+        finite_cost_critic = (
+            getattr(policy, 'cost_critic', None) is None
+            or self._finite_parameters(policy.cost_critic)
+        )
+        if not (
+            self._finite_parameters(policy.actor)
+            and self._finite_parameters(policy.critic)
+            and finite_cost_critic
+        ):
             raise FloatingPointError("PPO optimizer produced non-finite policy parameters")
 
         return (
@@ -182,6 +251,8 @@ class PPOTrainer():
             value_loss,
             policy_entropy_loss,
             safety_aux_loss.detach(),
+            cost_policy_loss.detach(),
+            cost_value_loss.detach(),
             ratio.detach().mean(),
             actor_grad_norm,
             critic_grad_norm,
@@ -198,6 +269,8 @@ class PPOTrainer():
         train_info['policy_loss'] = 0
         train_info['policy_entropy_loss'] = 0
         train_info['safety_aux_loss'] = 0
+        train_info['cost_policy_loss'] = 0
+        train_info['cost_value_loss'] = 0
         train_info['actor_grad_norm'] = 0
         train_info['critic_grad_norm'] = 0
         train_info['ratio'] = 0
@@ -206,6 +279,10 @@ class PPOTrainer():
         train_info['safety_aux_acc'] = 0
         train_info['safety_aux_pos_rate'] = 0
         train_info['safety_aux_valid_rate'] = 0
+        rollout_episode_cost = self._rollout_episode_cost(buffer)
+        train_info['constraint/episode_cost'] = rollout_episode_cost
+        train_info['constraint/cost_limit'] = self.cost_limit
+        train_info['constraint/lagrange_before_update'] = self.cost_lagrange
 
         for _ in range(self.ppo_epoch):
             if self.use_recurrent_policy:
@@ -215,7 +292,8 @@ class PPOTrainer():
 
             for sample in data_generator:
 
-                policy_loss, value_loss, policy_entropy_loss, safety_aux_loss, ratio, \
+                policy_loss, value_loss, policy_entropy_loss, safety_aux_loss, \
+                    cost_policy_loss, cost_value_loss, ratio, \
                     actor_grad_norm, critic_grad_norm, approx_kl, skipped, \
                     safety_aux_acc, safety_aux_pos_rate, safety_aux_valid_rate = self.ppo_update(policy, sample)
 
@@ -223,6 +301,8 @@ class PPOTrainer():
                 train_info['policy_loss'] += policy_loss.item()
                 train_info['policy_entropy_loss'] += policy_entropy_loss.item()
                 train_info['safety_aux_loss'] += safety_aux_loss.item()
+                train_info['cost_policy_loss'] += cost_policy_loss.item()
+                train_info['cost_value_loss'] += cost_value_loss.item()
                 train_info['actor_grad_norm'] += actor_grad_norm
                 train_info['critic_grad_norm'] += critic_grad_norm
                 train_info['ratio'] += ratio.item() if torch.is_tensor(ratio) else ratio
@@ -235,6 +315,30 @@ class PPOTrainer():
         num_updates = self.ppo_epoch * self.num_mini_batch
 
         for k in train_info.keys():
+            if k.startswith('constraint/'):
+                continue
             train_info[k] /= num_updates
 
+        if self.use_cost_constraints:
+            self.cost_lagrange = max(
+                0.0,
+                self.cost_lagrange
+                + self.cost_lagrange_lr * (rollout_episode_cost - self.cost_limit),
+            )
+        train_info['constraint/lagrange_after_update'] = self.cost_lagrange
+
         return train_info
+
+    def _rollout_episode_cost(self, buffer):
+        buffers = [buffer] if isinstance(buffer, ReplayBuffer) else buffer
+        cost_sum = 0.0
+        completed = 0.0
+        for buf in buffers:
+            if not getattr(buf, 'use_cost_constraints', False):
+                continue
+            cost_sum += float(buf.costs.sum())
+            completed += float((buf.masks[1:] < 0.5).sum())
+            completed += float((buf.bad_masks[1:] < 0.5).sum())
+        if completed <= 0.0:
+            return 0.0
+        return cost_sum / completed

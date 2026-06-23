@@ -50,6 +50,7 @@ def parse_args():
     p.add_argument("--min-level", type=int, default=0)
     p.add_argument("--max-level", type=int, default=119)
     p.add_argument("--max-steps", type=int, default=1500)
+    p.add_argument("--config-name", type=str, default="rc_human")
     p.add_argument("--model-name", type=str, default="HYBRID_NEW")
     p.add_argument(
         "--mode-order",
@@ -244,7 +245,7 @@ def run_vectorized_eval(args, device):
 
     env = ControlEnv(
         num_envs=len(levels_np),
-        config="rc_human",
+        config=args.config_name,
         model=args.model_name,
         random_seed=args.seed,
         device=device,

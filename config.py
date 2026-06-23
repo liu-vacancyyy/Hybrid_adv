@@ -30,7 +30,7 @@ def _get_prepare_config(parser: argparse.ArgumentParser):
     """
     Prepare parameters:
         --algorithm-name <str>
-            specifiy the algorithm, including `["ppo", "mappo"]`
+            specifiy the algorithm, including `["ppo", "mappo", "cpo"]`
         --experiment-name <str>
             an identifier to distinguish different experiment.
         --seed <int>
@@ -49,7 +49,7 @@ def _get_prepare_config(parser: argparse.ArgumentParser):
             by default None. set the path to pretrained model.
     """
     group = parser.add_argument_group("Prepare parameters")
-    group.add_argument("--algorithm-name", type=str, default='ppo', choices=["ppo", "mappo"],
+    group.add_argument("--algorithm-name", type=str, default='ppo', choices=["ppo", "mappo", "cpo"],
                        help="Specifiy the algorithm (default ppo)")
     group.add_argument("--experiment-name", type=str, default="check",
                        help="An identifier to distinguish different experiment.")
@@ -220,6 +220,18 @@ def _get_ppo_config(parser: argparse.ArgumentParser):
                        help='Loss coefficient for the safety auxiliary BCE loss.')
     group.add_argument("--safety-aux-pos-weight", type=float, default=5.0,
                        help='Positive-class weight for safety auxiliary BCE loss.')
+    group.add_argument("--use-cost-constraints", action='store_true', default=False,
+                       help='Enable constrained-policy updates using a separate cost signal.')
+    group.add_argument("--cost-limit", type=float, default=0.02,
+                       help='Allowed mean episode constraint cost. With bad_done cost this is the target bad_done fraction.')
+    group.add_argument("--cost-lagrange-init", type=float, default=1.0,
+                       help='Initial Lagrange multiplier for the constraint surrogate.')
+    group.add_argument("--cost-lagrange-lr", type=float, default=0.05,
+                       help='Dual update rate for the Lagrange multiplier.')
+    group.add_argument("--cost-value-loss-coef", type=float, default=0.25,
+                       help='Loss coefficient for the cost critic.')
+    group.add_argument("--cost-advantage-normalize", action='store_false', default=True,
+                       help='Whether to normalize cost advantages before actor updates.')
     return parser
 
 def _get_adv_config(parser: argparse.ArgumentParser):

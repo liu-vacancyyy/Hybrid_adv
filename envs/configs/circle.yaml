@@ -55,7 +55,6 @@ hover_alt_norm: 2.0
 altitude_limit: 0.2          # m
 acceleration_limit: 5.0      # g
 max_velocity: 10             # m/s
-max_y_velocity: 2.5          # m/s, lateral body velocity limit
 min_y_velocity: 0
 min_alpha: -45               # deg
 max_alpha: 45                # deg

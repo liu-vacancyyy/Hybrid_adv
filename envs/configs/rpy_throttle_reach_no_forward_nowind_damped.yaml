@@ -61,8 +61,6 @@ altitude_limit: 0.5
 acceleration_limit: 12.0
 overload_bad_done_persist_steps: 3
 max_velocity: 10
-max_y_velocity: 2
-max_body_y_velocity: 2.0
 min_alpha: -10
 max_alpha: 20
 min_beta: -15
@@ -105,12 +103,13 @@ sensor_omega_std: 0.0005
 #     paired to mode(x-5): mode5->mode0, mode6->mode1, ..., mode9->mode4.
 rpy_throttle_reach_levels_per_mode: 10
 rpy_throttle_reach_max_mode_slots: 10
-rpy_throttle_reach_curriculum_enable: true
+rpy_throttle_reach_curriculum_enable: false
+rpy_throttle_reach_uniform_mode_when_no_curriculum: true
 rpy_throttle_reach_initial_curriculum_level: 10
-rpy_throttle_reach_mix_current: 0.55
-rpy_throttle_reach_mix_easy_replay: 0.20
-rpy_throttle_reach_mix_medium_replay: 0.15
-rpy_throttle_reach_mix_random_replay: 0.10
+rpy_throttle_reach_mix_current: 0.40
+rpy_throttle_reach_mix_easy_replay: 0.10
+rpy_throttle_reach_mix_medium_replay: 0.10
+rpy_throttle_reach_mix_random_replay: 0.40
 rpy_throttle_reach_roll_limit_deg: 10.0
 rpy_throttle_reach_pitch_limit_deg: 10.0
 rpy_throttle_reach_yaw_limit_deg: 45.0
@@ -120,39 +119,40 @@ rpy_throttle_reach_max_collective_frac: 1.18
 rpy_throttle_reach_ramp_steps_min: 35
 rpy_throttle_reach_ramp_steps_max: 120
 rpy_throttle_reach_recover_ramp_steps: 80
-rpy_throttle_reach_transition_step_weight: 0.20
-rpy_throttle_reach_transition_ramp_weight: 0.30
-rpy_throttle_reach_transition_smooth_weight: 0.35
+rpy_throttle_reach_transition_step_weight: 0.10
+rpy_throttle_reach_transition_ramp_weight: 0.35
+rpy_throttle_reach_transition_smooth_weight: 0.40
 rpy_throttle_reach_transition_cosine_weight: 0.15
 rpy_throttle_reach_transient_grace_steps: 45
 rpy_throttle_reach_success_ignore_transient: true
 rpy_throttle_reach_success_attitude_error: 0.05236
-rpy_throttle_reach_success_yaw_error: 0.08727
+rpy_throttle_reach_success_yaw_error: 0.10472
 rpy_throttle_reach_success_throttle_error: 0.08
 rpy_throttle_reach_success_overshoot: 0.22
+# Logged for diagnostics, but no longer used as curriculum-upgrade gates.
 rpy_throttle_reach_success_danger: 0.08
 rpy_throttle_reach_success_override_fraction: 0.20
 
 # Online pose pool.  It stores stable states from training and reuses them as
 # initial states for modes 5-9.  Pool lives inside the training process.
 rpy_throttle_reach_pose_pool_capacity: 4096
+rpy_throttle_reach_pose_pool_ready_insert_count: 2048
 rpy_throttle_reach_pose_pool_min_insert_steps: 120
 rpy_throttle_reach_pose_pool_insert_interval: 25
 rpy_throttle_reach_pose_pool_max_insert_per_step: 64
 rpy_throttle_reach_pose_pool_success_only: false
-rpy_throttle_reach_pose_pool_roll_pitch_limit_deg: 12.0
-rpy_throttle_reach_pose_pool_omega_limit: 1.2
-rpy_throttle_reach_pose_pool_speed_limit: 4.0
-rpy_throttle_reach_pose_pool_danger_limit: 0.05
+rpy_throttle_reach_pose_pool_roll_pitch_limit_deg: 8.0
+rpy_throttle_reach_pose_pool_omega_limit: 0.8
+rpy_throttle_reach_pose_pool_speed_limit: 2.5
+rpy_throttle_reach_pose_pool_danger_limit: 0.02
 
-# Safety envelope for danger scoring.  Target override is disabled by default:
-# safety is learned through the PPO auxiliary crash predictor plus safety
-# reward terms, while the original target remains unchanged.
+# Safety envelope for diagnostics / constraint-cost logging.
+# CPO-style training keeps hard failures in the cost channel instead of the
+# scalar reward.
+rpy_throttle_reach_constraints_as_cost: true
 rpy_throttle_reach_safety_override_enable: false
 rpy_throttle_reach_safety_speed_enter: 8.0
 rpy_throttle_reach_safety_speed_exit: 6.5
-rpy_throttle_reach_safety_side_enter: 1.6
-rpy_throttle_reach_safety_side_exit: 1.0
 rpy_throttle_reach_safety_altitude_enter: 1.5
 rpy_throttle_reach_safety_altitude_exit: 3.0
 rpy_throttle_reach_safety_angle_enter_deg: 18.0
@@ -173,9 +173,9 @@ rpy_throttle_reach_w_omega: 2.0
 rpy_throttle_reach_w_smooth: 0.9
 rpy_throttle_reach_w_overshoot: 2.8
 rpy_throttle_reach_w_moving_away: 0.9
-rpy_throttle_reach_w_safety: 0.3
-rpy_throttle_reach_w_danger: 0.25
-rpy_throttle_reach_w_override: 0.08
+rpy_throttle_reach_w_safety: 0.0
+rpy_throttle_reach_w_danger: 0.0
+rpy_throttle_reach_w_override: 0.0
 rpy_throttle_reach_w_saturation: 0.35
 rpy_throttle_reach_sig_roll: 0.052
 rpy_throttle_reach_sig_pitch: 0.052
@@ -186,6 +186,6 @@ rpy_throttle_reach_sig_smooth: 0.55
 rpy_throttle_reach_sig_overshoot: 0.18
 
 # Terminal event reward.
-rpy_throttle_reach_bad_done_penalty: 220.0
+rpy_throttle_reach_bad_done_penalty: 0.0
 rpy_throttle_reach_clean_done_bonus: 8.0
 rpy_throttle_reach_success_bonus: 40.0

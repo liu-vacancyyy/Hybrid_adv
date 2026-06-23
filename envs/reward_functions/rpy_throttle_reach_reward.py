@@ -15,6 +15,7 @@ class RPYThrottleReachReward(BaseRewardFunction):
     def __init__(self, config):
         super().__init__(config)
         p = 'rpy_throttle_reach_'
+        self.constraints_as_cost = bool(getattr(config, p + 'constraints_as_cost', False))
         self.w_alive = float(getattr(config, p + 'w_alive', 0.05))
         self.w_attitude = float(getattr(config, p + 'w_attitude', 5.0))
         self.w_yaw = float(getattr(config, p + 'w_yaw', 2.0))
@@ -59,6 +60,7 @@ class RPYThrottleReachReward(BaseRewardFunction):
             roll_error, pitch_error, yaw_error, throttle_error
         )
         danger_score, safety_score = task.compute_safety_scores(env)
+        task.update_constraint_terms(env)
         task.update_episode_metrics(
             attitude_error,
             torch.abs(yaw_error),
@@ -98,9 +100,14 @@ class RPYThrottleReachReward(BaseRewardFunction):
         reward_omega = self.w_omega * r_omega
         reward_overshoot = self.w_overshoot * r_overshoot
         reward_moving_away = -self.w_moving_away * moving_away
-        reward_safety = self.w_safety * safety_score
-        reward_danger = -self.w_danger * danger_score
-        reward_override = -self.w_override * task.safety_override_active.float()
+        if self.constraints_as_cost:
+            reward_safety = torch.zeros_like(reward_alive)
+            reward_danger = torch.zeros_like(reward_alive)
+            reward_override = torch.zeros_like(reward_alive)
+        else:
+            reward_safety = self.w_safety * safety_score
+            reward_danger = -self.w_danger * danger_score
+            reward_override = -self.w_override * task.safety_override_active.float()
         reward_saturation = -self.w_saturation * saturation
 
         if self.w_smooth > 0.0:
@@ -159,6 +166,7 @@ class RPYThrottleReachEventReward(BaseRewardFunction):
     def __init__(self, config):
         super().__init__(config)
         p = 'rpy_throttle_reach_'
+        self.constraints_as_cost = bool(getattr(config, p + 'constraints_as_cost', False))
         self.bad_done_penalty = float(getattr(config, p + 'bad_done_penalty', 220.0))
         self.clean_done_bonus = float(getattr(config, p + 'clean_done_bonus', 8.0))
         self.success_bonus = float(getattr(config, p + 'success_bonus', 40.0))
@@ -168,7 +176,8 @@ class RPYThrottleReachEventReward(BaseRewardFunction):
         clean_done = env.is_done.bool() & (~bad_done)
         success = clean_done & task.episode_success_mask(env)
         reward = torch.zeros(env.n, device=env.device)
-        reward = reward - self.bad_done_penalty * bad_done.float()
+        if not self.constraints_as_cost:
+            reward = reward - self.bad_done_penalty * bad_done.float()
         reward = reward + self.clean_done_bonus * clean_done.float()
         reward = reward + self.success_bonus * success.float()
         return reward

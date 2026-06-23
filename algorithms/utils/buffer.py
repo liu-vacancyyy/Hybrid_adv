@@ -45,6 +45,13 @@ class ReplayBuffer(Buffer):
         self.gae_lambda = args.gae_lambda
         self.use_safety_aux = bool(getattr(args, 'use_safety_aux', False))
         self.safety_aux_horizon = max(1, int(getattr(args, 'safety_aux_horizon', 50)))
+        self.use_cost_constraints = (
+            bool(getattr(args, 'use_cost_constraints', False))
+            or getattr(args, 'algorithm_name', '') == 'cpo'
+        )
+        self.cost_advantage_normalize = bool(
+            getattr(args, 'cost_advantage_normalize', True)
+        )
         # rnn config
         self.recurrent_hidden_size = args.recurrent_hidden_size
         self.recurrent_hidden_layers = args.recurrent_hidden_layers
@@ -66,10 +73,14 @@ class ReplayBuffer(Buffer):
         # V(o), R(o) while advantage = returns - value_preds
         self.value_preds = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         self.returns = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
+        self.costs = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
+        self.cost_value_preds = np.zeros_like(self.value_preds)
+        self.cost_returns = np.zeros_like(self.returns)
         # rnn
         self.rnn_states_actor = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents,
                                           self.recurrent_hidden_layers, self.recurrent_hidden_size), dtype=np.float32)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
+        self.rnn_states_cost_critic = np.zeros_like(self.rnn_states_actor)
         self.safety_targets = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         self.safety_valid = np.zeros_like(self.safety_targets, dtype=np.float32)
 
@@ -83,6 +94,13 @@ class ReplayBuffer(Buffer):
         #     pdb.set_trace()
         return (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
+    @property
+    def cost_advantages(self) -> np.ndarray:
+        advantages = self.cost_returns[:-1] - self.cost_value_preds[:-1]
+        if not self.cost_advantage_normalize:
+            return advantages
+        return (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+
     def insert(self,
                obs: np.ndarray,
                actions: np.ndarray,
@@ -93,6 +111,9 @@ class ReplayBuffer(Buffer):
                rnn_states_actor: np.ndarray,
                rnn_states_critic: np.ndarray,
                bad_masks: Union[np.ndarray, None] = None,
+               costs: Union[np.ndarray, None] = None,
+               cost_value_preds: Union[np.ndarray, None] = None,
+               rnn_states_cost_critic: Union[np.ndarray, None] = None,
                **kwargs):
         """Insert numpy data.
         Args:
@@ -116,6 +137,13 @@ class ReplayBuffer(Buffer):
         self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
         if bad_masks is not None:
             self.bad_masks[self.step + 1] = bad_masks.copy()
+        if self.use_cost_constraints:
+            if costs is not None:
+                self.costs[self.step] = costs.copy()
+            if cost_value_preds is not None:
+                self.cost_value_preds[self.step] = cost_value_preds.copy()
+            if rnn_states_cost_critic is not None:
+                self.rnn_states_cost_critic[self.step + 1] = rnn_states_cost_critic.copy()
 
         self.step = (self.step + 1) % self.buffer_size
 
@@ -126,6 +154,7 @@ class ReplayBuffer(Buffer):
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.rnn_states_actor[0] = self.rnn_states_actor[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
+        self.rnn_states_cost_critic[0] = self.rnn_states_cost_critic[-1].copy()
 
     def clear(self):
         self.step = 0
@@ -137,12 +166,16 @@ class ReplayBuffer(Buffer):
         self.action_log_probs = np.zeros_like(self.action_log_probs, dtype=np.float32)
         self.value_preds = np.zeros_like(self.value_preds, dtype=np.float32)
         self.returns = np.zeros_like(self.returns, dtype=np.float32)
+        self.costs = np.zeros_like(self.costs, dtype=np.float32)
+        self.cost_value_preds = np.zeros_like(self.cost_value_preds, dtype=np.float32)
+        self.cost_returns = np.zeros_like(self.cost_returns, dtype=np.float32)
         self.rnn_states_actor = np.zeros_like(self.rnn_states_critic)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
+        self.rnn_states_cost_critic = np.zeros_like(self.rnn_states_cost_critic)
         self.safety_targets = np.zeros_like(self.safety_targets, dtype=np.float32)
         self.safety_valid = np.zeros_like(self.safety_valid, dtype=np.float32)
 
-    def compute_returns(self, next_value: np.ndarray):
+    def compute_returns(self, next_value: np.ndarray, next_cost_value: Union[np.ndarray, None] = None):
         """
         Compute returns either as discounted sum of rewards, or using GAE.
 
@@ -179,6 +212,35 @@ class ReplayBuffer(Buffer):
                     self.returns[step] = self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]
         if self.use_safety_aux:
             self.compute_safety_targets()
+        if self.use_cost_constraints and next_cost_value is not None:
+            self.compute_cost_returns(next_cost_value)
+
+    def compute_cost_returns(self, next_cost_value: np.ndarray):
+        """Compute GAE returns for constraint costs.
+
+        Cost episodes should stop on either a clean done or a bad_done.  The
+        reward path historically masks only clean dones, so the cost path uses
+        bad_masks explicitly to avoid leaking costs across reset boundaries.
+        """
+        self.cost_value_preds[-1] = next_cost_value
+        terminal_masks = self.masks * self.bad_masks
+        if self.use_gae:
+            gae = 0
+            for step in reversed(range(self.costs.shape[0])):
+                td_delta = (
+                    self.costs[step]
+                    + self.gamma * self.cost_value_preds[step + 1] * terminal_masks[step + 1]
+                    - self.cost_value_preds[step]
+                )
+                gae = td_delta + self.gamma * self.gae_lambda * terminal_masks[step + 1] * gae
+                self.cost_returns[step] = gae + self.cost_value_preds[step]
+        else:
+            self.cost_returns[-1] = next_cost_value
+            for step in reversed(range(self.costs.shape[0])):
+                self.cost_returns[step] = (
+                    self.cost_returns[step + 1] * self.gamma * terminal_masks[step + 1]
+                    + self.costs[step]
+                )
 
     def compute_safety_targets(self):
         """Build labels: 1 if a bad_done occurs within the next H transitions."""
@@ -246,6 +308,14 @@ class ReplayBuffer(Buffer):
         rnn_states_actor = np.vstack([ReplayBuffer._cast(buf.rnn_states_actor[:-1]) for buf in buffer])
         rnn_states_critic = np.vstack([ReplayBuffer._cast(buf.rnn_states_critic[:-1]) for buf in buffer])
         use_safety_aux = buffer[0].use_safety_aux
+        use_cost_constraints = buffer[0].use_cost_constraints
+        if use_cost_constraints:
+            cost_advantages = np.vstack([ReplayBuffer._cast(buf.cost_advantages) for buf in buffer])
+            cost_returns = np.vstack([ReplayBuffer._cast(buf.cost_returns[:-1]) for buf in buffer])
+            cost_value_preds = np.vstack([ReplayBuffer._cast(buf.cost_value_preds[:-1]) for buf in buffer])
+            rnn_states_cost_critic = np.vstack([
+                ReplayBuffer._cast(buf.rnn_states_cost_critic[:-1]) for buf in buffer
+            ])
         if use_safety_aux:
             safety_targets = np.vstack([ReplayBuffer._cast(buf.safety_targets) for buf in buffer])
             safety_valid = np.vstack([ReplayBuffer._cast(buf.safety_valid) for buf in buffer])
@@ -265,16 +335,22 @@ class ReplayBuffer(Buffer):
             value_preds_batch = value_preds[indices]
             rnn_states_actor_batch = rnn_states_actor[indices]
             rnn_states_critic_batch = rnn_states_critic[indices]
+            batch = [
+                obs_batch, actions_batch, masks_batch, old_action_log_probs_batch,
+                advantages_batch, returns_batch, value_preds_batch,
+                rnn_states_actor_batch, rnn_states_critic_batch,
+            ]
+            if use_cost_constraints:
+                batch.extend([
+                    cost_advantages[indices],
+                    cost_returns[indices],
+                    cost_value_preds[indices],
+                    rnn_states_cost_critic[indices],
+                ])
             if use_safety_aux:
-                safety_targets_batch = safety_targets[indices]
-                safety_valid_batch = safety_valid[indices]
+                batch.extend([safety_targets[indices], safety_valid[indices]])
 
-                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch, \
-                    safety_targets_batch, safety_valid_batch
-            else:
-                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
+            yield tuple(batch)
 
     @staticmethod
     def recurrent_generator(buffer: Union[Buffer, List[Buffer]], num_mini_batch: int, data_chunk_length: int):
@@ -318,6 +394,14 @@ class ReplayBuffer(Buffer):
         rnn_states_actor = np.vstack([ReplayBuffer._cast(buf.rnn_states_actor[:-1]) for buf in buffer])
         rnn_states_critic = np.vstack([ReplayBuffer._cast(buf.rnn_states_critic[:-1]) for buf in buffer])
         use_safety_aux = buffer[0].use_safety_aux
+        use_cost_constraints = buffer[0].use_cost_constraints
+        if use_cost_constraints:
+            cost_advantages = np.vstack([ReplayBuffer._cast(buf.cost_advantages) for buf in buffer])
+            cost_returns = np.vstack([ReplayBuffer._cast(buf.cost_returns[:-1]) for buf in buffer])
+            cost_value_preds = np.vstack([ReplayBuffer._cast(buf.cost_value_preds[:-1]) for buf in buffer])
+            rnn_states_cost_critic = np.vstack([
+                ReplayBuffer._cast(buf.rnn_states_cost_critic[:-1]) for buf in buffer
+            ])
         if use_safety_aux:
             safety_targets = np.vstack([ReplayBuffer._cast(buf.safety_targets) for buf in buffer])
             safety_valid = np.vstack([ReplayBuffer._cast(buf.safety_valid) for buf in buffer])
@@ -338,6 +422,11 @@ class ReplayBuffer(Buffer):
             value_preds_batch = []
             rnn_states_actor_batch = []
             rnn_states_critic_batch = []
+            if use_cost_constraints:
+                cost_advantages_batch = []
+                cost_returns_batch = []
+                cost_value_preds_batch = []
+                rnn_states_cost_critic_batch = []
             if use_safety_aux:
                 safety_targets_batch = []
                 safety_valid_batch = []
@@ -353,12 +442,18 @@ class ReplayBuffer(Buffer):
                 advantages_batch.append(advantages[ind:ind + data_chunk_length])
                 returns_batch.append(returns[ind:ind + data_chunk_length])
                 value_preds_batch.append(value_preds[ind:ind + data_chunk_length])
+                if use_cost_constraints:
+                    cost_advantages_batch.append(cost_advantages[ind:ind + data_chunk_length])
+                    cost_returns_batch.append(cost_returns[ind:ind + data_chunk_length])
+                    cost_value_preds_batch.append(cost_value_preds[ind:ind + data_chunk_length])
                 if use_safety_aux:
                     safety_targets_batch.append(safety_targets[ind:ind + data_chunk_length])
                     safety_valid_batch.append(safety_valid[ind:ind + data_chunk_length])
                 # size [T+1, N, Dim] => [T, N, Dim] => [N, T, Dim] => [N * T, Dim] => [1, Dim]
                 rnn_states_actor_batch.append(rnn_states_actor[ind])
                 rnn_states_critic_batch.append(rnn_states_critic[ind])
+                if use_cost_constraints:
+                    rnn_states_cost_critic_batch.append(rnn_states_cost_critic[ind])
 
             L, N = data_chunk_length, mini_batch_size
 
@@ -374,6 +469,9 @@ class ReplayBuffer(Buffer):
             # States is just a (N, -1) from_numpy
             rnn_states_actor_batch = np.stack(rnn_states_actor_batch).reshape(N, *buffer[0].rnn_states_actor.shape[3:])
             rnn_states_critic_batch = np.stack(rnn_states_critic_batch).reshape(N, *buffer[0].rnn_states_critic.shape[3:])
+            if use_cost_constraints:
+                rnn_states_cost_critic_batch = np.stack(rnn_states_cost_critic_batch).reshape(
+                    N, *buffer[0].rnn_states_cost_critic.shape[3:])
 
             # Flatten the (L, N, ...) from_numpys to (L * N, ...)
             obs_batch = ReplayBuffer._flatten(L, N, obs_batch)
@@ -383,19 +481,29 @@ class ReplayBuffer(Buffer):
             advantages_batch = ReplayBuffer._flatten(L, N, advantages_batch)
             returns_batch = ReplayBuffer._flatten(L, N, returns_batch)
             value_preds_batch = ReplayBuffer._flatten(L, N, value_preds_batch)
+            batch = [
+                obs_batch, actions_batch, masks_batch, old_action_log_probs_batch,
+                advantages_batch, returns_batch, value_preds_batch,
+                rnn_states_actor_batch, rnn_states_critic_batch,
+            ]
+            if use_cost_constraints:
+                cost_advantages_batch = np.stack(cost_advantages_batch, axis=1)
+                cost_returns_batch = np.stack(cost_returns_batch, axis=1)
+                cost_value_preds_batch = np.stack(cost_value_preds_batch, axis=1)
+                batch.extend([
+                    ReplayBuffer._flatten(L, N, cost_advantages_batch),
+                    ReplayBuffer._flatten(L, N, cost_returns_batch),
+                    ReplayBuffer._flatten(L, N, cost_value_preds_batch),
+                    rnn_states_cost_critic_batch,
+                ])
             if use_safety_aux:
                 safety_targets_batch = np.stack(safety_targets_batch, axis=1)
                 safety_valid_batch = np.stack(safety_valid_batch, axis=1)
                 safety_targets_batch = ReplayBuffer._flatten(L, N, safety_targets_batch)
                 safety_valid_batch = ReplayBuffer._flatten(L, N, safety_valid_batch)
+                batch.extend([safety_targets_batch, safety_valid_batch])
 
-            if use_safety_aux:
-                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch, \
-                    safety_targets_batch, safety_valid_batch
-            else:
-                yield obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-                    returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch
+            yield tuple(batch)
 
 class AdvReplayBuffer(Buffer):
     @staticmethod

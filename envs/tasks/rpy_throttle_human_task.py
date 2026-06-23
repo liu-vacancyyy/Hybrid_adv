@@ -16,7 +16,6 @@ from hybrid_termination_conditions.extreme_angle import ExtremeAngle
 from hybrid_termination_conditions.extreme_omega import ExtremeOmega
 from hybrid_termination_conditions.overload import Overload
 from hybrid_termination_conditions.high_speed import HighSpeed
-from hybrid_termination_conditions.body_side_velocity import BodySideVelocity
 from termination_conditions.hover_timeout_done import HoverTimeoutDone
 from utils.utils import wrap_PI
 
@@ -119,6 +118,11 @@ class RPYThrottleHumanTask(RCHumanTask):
         self.success_overshoot = float(getattr(
             config, 'rpy_throttle_success_overshoot', 0.20
         ))
+        self.success_ignore_transient = bool(getattr(
+            config,
+            'rpy_throttle_success_ignore_transient',
+            getattr(config, 'rc_human_success_ignore_transient', True),
+        ))
         self.safety_override_enable = bool(getattr(
             config, 'rpy_throttle_safety_override_enable', False
         ))
@@ -186,7 +190,6 @@ class RPYThrottleHumanTask(RCHumanTask):
             Overload(self.config),
             LowAltitude(self.config),
             HighSpeed(self.config),
-            BodySideVelocity(self.config),
             ExtremeAngle(self.config),
             ExtremeOmega(self.config),
             HoverTimeoutDone(self.config),

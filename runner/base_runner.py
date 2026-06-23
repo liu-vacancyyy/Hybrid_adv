@@ -80,7 +80,21 @@ class Runner(object):
                                              np.concatenate(self.buffer.rnn_states_critic[-1]),
                                              np.concatenate(self.buffer.masks[-1]))
         next_values = np.array(np.split(_t2n(next_values), self.buffer.n_rollout_threads))
-        self.buffer.compute_returns(next_values)
+        next_cost_values = None
+        if (
+            getattr(self.all_args, 'use_cost_constraints', False)
+            and hasattr(self.policy, 'get_cost_values')
+            and hasattr(self.buffer, 'rnn_states_cost_critic')
+        ):
+            next_cost_values, _ = self.policy.get_cost_values(
+                np.concatenate(self.buffer.obs[-1]),
+                np.concatenate(self.buffer.rnn_states_cost_critic[-1]),
+                np.concatenate(self.buffer.masks[-1]),
+            )
+            next_cost_values = np.array(np.split(
+                _t2n(next_cost_values), self.buffer.n_rollout_threads
+            ))
+        self.buffer.compute_returns(next_values, next_cost_values)
 
     def train(self):
         self.policy.prep_training()
@@ -93,6 +107,11 @@ class Runner(object):
         torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor_latest.pt")
         policy_critic = self.policy.critic
         torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic_latest.pt")
+        if getattr(self.policy, 'cost_critic', None) is not None:
+            torch.save(
+                self.policy.cost_critic.state_dict(),
+                str(self.save_dir) + "/cost_critic_latest.pt",
+            )
 
     def restore(self):
         actor_path = str(self.model_dir) + '/actor_latest.pt'
@@ -105,6 +124,12 @@ class Runner(object):
             critic_path = str(self.model_dir) + '/critic_latest.ckpt'
         policy_critic_state_dict = torch.load(critic_path)
         self.policy.critic.load_state_dict(policy_critic_state_dict)
+        if getattr(self.policy, 'cost_critic', None) is not None:
+            cost_critic_path = str(self.model_dir) + '/cost_critic_latest.pt'
+            if not os.path.exists(cost_critic_path):
+                cost_critic_path = str(self.model_dir) + '/cost_critic_latest.ckpt'
+            if os.path.exists(cost_critic_path):
+                self.policy.cost_critic.load_state_dict(torch.load(cost_critic_path))
 
     def log_info(self, infos, total_num_steps):
          for k, v in infos.items():
