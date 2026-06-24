@@ -70,8 +70,8 @@ class RCHumanTrackingError(BaseTerminationCondition):
         vz = env.model.get_climb_rate()
 
         yaw_error = torch.abs(wrap_PI(heading - task.target_heading))
-        local_vx_error, local_vy_error = task.ground_to_local_velocity(
-            vx_n - task.target_vn, vy_e - task.target_ve, heading
+        local_vx_error, local_vy_error = task.heading_local_velocity_error(
+            vx_n, vy_e, heading
         )
         vx_error = torch.abs(local_vx_error)
         vy_error = torch.abs(local_vy_error)

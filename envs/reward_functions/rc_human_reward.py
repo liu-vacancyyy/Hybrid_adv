@@ -63,9 +63,7 @@ class RCHumanReward(BaseRewardFunction):
         vx_n, vy_e = env.model.get_ground_speed()
         vz = env.model.get_climb_rate()
 
-        dvx, dvy = task.ground_to_local_velocity(
-            vx_n - task.target_vn, vy_e - task.target_ve, heading
-        )
+        dvx, dvy = task.heading_local_velocity_error(vx_n, vy_e, heading)
         dvz = vz - task.target_vz
         dyaw = wrap_PI(heading - task.target_heading)
         dyaw_reward = dyaw

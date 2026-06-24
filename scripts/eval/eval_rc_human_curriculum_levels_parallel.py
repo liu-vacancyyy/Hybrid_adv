@@ -144,9 +144,7 @@ def collect_arrays(env, obs, reward, action, prev_action):
     p, q, r = env.model.get_angular_velocity()
     f1, f2, f3, f4, f5 = env.model.get_F()
     local_vx, local_vy = task.ground_to_local_velocity(vx_n, vy_e, heading)
-    err_vx, err_vy = task.ground_to_local_velocity(
-        vx_n - task.target_vn, vy_e - task.target_ve, heading
-    )
+    err_vx, err_vy = task.heading_local_velocity_error(vx_n, vy_e, heading)
     err_vz = vz - task.target_vz
     yaw_err = torch.atan2(
         torch.sin(heading - task.target_heading),

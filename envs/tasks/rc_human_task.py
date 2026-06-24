@@ -27,8 +27,10 @@ class RCHumanTask(BaseTask):
     PX4's manual yaw-rate first-order filter. VTOL in MC mode uses the same
     multicopter manual task path; for this velocity-tracking task we mirror the
     ManualPosition direct-velocity mapping: horizontal sticks are expo-shaped,
-    limited to the unit circle, scaled by forward/back/side velocity limits,
-    and rotated from the heading frame into the local N/E velocity setpoint.
+    limited to the unit circle, and scaled by forward/back/side velocity limits.
+    target_vx/target_vy are current-heading local velocity commands; target_vn/
+    target_ve are only the same command rotated into the world frame for logging
+    and compatibility with older analysis scripts.
     """
 
     def __init__(self, config, n, device, random_seed):
@@ -311,6 +313,10 @@ class RCHumanTask(BaseTask):
         vx_n = local_vx * torch.cos(heading) - local_vy * torch.sin(heading)
         vy_e = local_vx * torch.sin(heading) + local_vy * torch.cos(heading)
         return vx_n, vy_e
+
+    def heading_local_velocity_error(self, vx_n, vy_e, heading):
+        local_vx, local_vy = self.ground_to_local_velocity(vx_n, vy_e, heading)
+        return local_vx - self.target_vx, local_vy - self.target_vy
 
     def _resample_raw_sticks(self, mask, env=None):
         size = int(torch.sum(mask).item())
@@ -842,7 +848,7 @@ class RCHumanTask(BaseTask):
             self.target_yaw_rate[mask] = 0.0
 
         _npos, _epos, altitude = env.model.get_position()
-        _roll, _pitch, _heading = env.model.get_posture()
+        _roll, _pitch, heading = env.model.get_posture()
         high = mask & (altitude > self.alt_high) & (self.target_vz > 0.0)
         low = mask & (altitude < self.alt_low) & (self.target_vz < 0.0)
         self.target_vz[high | low] = 0.0
@@ -853,7 +859,7 @@ class RCHumanTask(BaseTask):
                 self.target_heading[mask] + self.target_yaw_rate[mask] * self.dt
             )
         self.target_vn[mask], self.target_ve[mask] = self.local_to_ground_velocity(
-            self.target_vx[mask], self.target_vy[mask], self.target_heading[mask]
+            self.target_vx[mask], self.target_vy[mask], heading[mask]
         )
 
     def _apply_px4_vtol_mc_manual_sticks(self, mask, env):
@@ -981,9 +987,8 @@ class RCHumanTask(BaseTask):
             eas = torch.clamp(eas + torch.randn_like(eas) * self.sensor_vel_std, min=0.0)
 
         local_vx, local_vy = self.ground_to_local_velocity(vx_n, vy_e, heading)
-        err_local_vx, err_local_vy = self.ground_to_local_velocity(
-            vx_n - self.target_vn, vy_e - self.target_ve, heading
-        )
+        err_local_vx = local_vx - self.target_vx
+        err_local_vy = local_vy - self.target_vy
 
         norm_dvx = (err_local_vx / max(self.vx_limit, 1e-6)).reshape(-1, 1)
         norm_dvy = (err_local_vy / max(self.vy_limit, 1e-6)).reshape(-1, 1)
