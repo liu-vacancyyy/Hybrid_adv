@@ -235,8 +235,6 @@ class RCHumanAdversarialEnv:
             if hasattr(self.task, "vx_forward_limit"):
                 self.task.vx_forward_limit[mask] = self.task.vx_max
             self.task.dwell_left[mask] = 10**9
-            if hasattr(self.task, "command_transient_left"):
-                self.task.command_transient_left[mask] = 0
             if hasattr(self.task, "mode5_release_state"):
                 self.task.mode5_release_state[mask] = 0
                 self.task.mode5_hold_elapsed[mask] = 0
@@ -338,10 +336,6 @@ class RCHumanAdversarialEnv:
             if hasattr(task, "_apply_raw_stick_rate_limit"):
                 task._apply_raw_stick_rate_limit(mask)
             task.dwell_left[mask] = torch.clamp(task.dwell_left[mask] - 1, min=0)
-            task.command_transient_left[mask] = torch.clamp(
-                task.command_transient_left[mask] - 1,
-                min=0,
-            )
             task.last_synced_step[mask] += 1
             guard += 1
             if guard > 4:
@@ -355,28 +349,9 @@ class RCHumanAdversarialEnv:
             task.raw_yaw,
         ), dim=1)
 
-    def _apply_px4_stick_command(self, raw_stick, update_transient=True):
+    def _apply_px4_stick_command(self, raw_stick):
         task = self.env.task
         raw_stick = torch.clamp(raw_stick, -1.0, 1.0)
-        if update_transient and hasattr(task, "command_transient_left"):
-            prev_raw = torch.stack((
-                task.raw_vx,
-                task.raw_vy,
-                task.raw_vz,
-                task.raw_yaw,
-            ), dim=1)
-            delta_raw = torch.max(torch.abs(raw_stick - prev_raw), dim=1).values
-            task.command_transient_left[:] = torch.clamp(
-                task.command_transient_left - 1,
-                min=0,
-            )
-            changed = delta_raw > task.command_transient_threshold
-            if torch.any(changed):
-                task.command_transient_left[changed] = max(
-                    task.command_transient_grace_steps,
-                    0,
-                )
-
         task.raw_vx[:] = raw_stick[:, 0]
         task.raw_vy[:] = raw_stick[:, 1]
         task.raw_vz[:] = raw_stick[:, 2]
@@ -417,7 +392,7 @@ class RCHumanAdversarialEnv:
             raw_stick = torch.clamp(base_raw + self.adv_command, -1.0, 1.0)
         else:
             raw_stick = self.adv_command
-        self._apply_px4_stick_command(raw_stick, update_transient=not random_base)
+        self._apply_px4_stick_command(raw_stick)
         self._freeze_task_sync()
 
     def _apply_wind_attack(self, wind):

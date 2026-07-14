@@ -41,7 +41,6 @@ class RCHumanTrackingError(BaseTerminationCondition):
         self.vz_error_limit = float(
             getattr(config, 'rc_human_bad_done_vz_error', self.axis_vel_error_limit)
         )
-        self.grace_steps = int(getattr(config, 'rc_human_bad_done_grace_steps', 50))
         self.persist_steps = max(
             1, int(getattr(config, 'rc_human_bad_done_persist_steps', 10))
         )
@@ -81,21 +80,12 @@ class RCHumanTrackingError(BaseTerminationCondition):
             torch.abs(task.target_vx) * self.vx_error_frac,
         )
 
-        active = env.step_count > self.grace_steps
-        transient_left = getattr(task, 'command_transient_left', None)
-        if transient_left is None:
-            velocity_tracking_active = torch.ones_like(active, dtype=torch.bool)
-        else:
-            velocity_tracking_active = transient_left <= 0
-        mode5_state = getattr(task, 'mode5_release_state', None)
-        if mode5_state is not None:
-            velocity_tracking_active = velocity_tracking_active & (mode5_state != 1)
         if self.enable and self.yaw_tracking_enable:
             yaw_violation = yaw_error > self.yaw_error_limit
         else:
             yaw_violation = torch.zeros_like(yaw_error, dtype=torch.bool)
         if self.enable:
-            velocity_violation = velocity_tracking_active & (
+            velocity_violation = (
                 (vx_error > vx_limit)
                 | (vy_error > self.vy_error_limit)
                 | (vz_error > self.vz_error_limit)
@@ -110,7 +100,7 @@ class RCHumanTrackingError(BaseTerminationCondition):
             dynamic_vx_limit = torch.abs(task.target_vx - initial_local_vx) + self.vxyvz_dynamic_margin
             dynamic_vy_limit = torch.abs(task.target_vy - initial_local_vy) + self.vxyvz_dynamic_margin
             dynamic_vz_limit = torch.abs(task.target_vz - initial_vz) + self.vxyvz_dynamic_margin
-            dynamic_velocity_violation = velocity_tracking_active & (
+            dynamic_velocity_violation = (
                 (vx_error > dynamic_vx_limit)
                 | (vy_error > dynamic_vy_limit)
                 | (vz_error > dynamic_vz_limit)
@@ -118,9 +108,7 @@ class RCHumanTrackingError(BaseTerminationCondition):
         else:
             dynamic_velocity_violation = torch.zeros_like(vx_error, dtype=torch.bool)
 
-        violation = active & (
-            yaw_violation | velocity_violation | dynamic_velocity_violation
-        )
+        violation = yaw_violation | velocity_violation | dynamic_velocity_violation
         self.violation_count = torch.where(
             violation,
             self.violation_count + 1,

@@ -25,7 +25,7 @@ HOVER_ALT_NORM = 2.0     # m
 class HoverTask(BaseTask):
     """Hover at a fixed (npos, epos, altitude, heading) locked at spawn.
 
-    Observation (dim = 24, all dimensionless):
+    Observation (dim = 24 by default, all dimensionless):
         0.  delta_n / hover_pos_norm     (target_npos - npos)
         1.  delta_e / hover_pos_norm
         2.  delta_alt / hover_alt_norm
@@ -41,7 +41,10 @@ class HoverTask(BaseTask):
         14.  R
         15-16. alpha sin, cos
         17-18. beta  sin, cos
-        19-23. F_head, F_rf, F_lb, F_lf, F_rb (all / 7N)
+        19-23. F_head, F_rf, F_lb, F_lf, F_rb (all / hover_force_norm)
+
+    If hover_include_position_obs is false, delta_n / delta_e / delta_alt are
+    omitted and the observation dimension is 21.
     """
 
     def __init__(self, config, n, device, random_seed):
@@ -57,12 +60,16 @@ class HoverTask(BaseTask):
         self.noise_scale = getattr(config, 'noise_scale', 0.01)
         self.pos_norm = float(getattr(config, 'hover_pos_norm', HOVER_POS_NORM))
         self.alt_norm = float(getattr(config, 'hover_alt_norm', HOVER_ALT_NORM))
+        self.force_norm = float(getattr(config, 'hover_force_norm', 7.0))
+        self.include_position_obs = bool(getattr(config, 'hover_include_position_obs', True))
 
         # ---- Sensor noise (zero-mean Gaussian, NO bias) ----
         # Applied only inside _build_obs(env, add_sensor_noise=True).  The
         # privileged expert calls get_clean_obs(env) and bypasses noise.
         self.enable_sensor_noise = getattr(config, 'enable_sensor_noise', True)
         self.sensor_pos_std   = float(getattr(config, 'sensor_pos_std',   1.0))
+        self.sensor_xy_pos_std = float(getattr(config, 'sensor_xy_pos_std', self.sensor_pos_std))
+        self.sensor_alt_std = float(getattr(config, 'sensor_alt_std', self.sensor_pos_std))
         self.sensor_vel_std   = float(getattr(config, 'sensor_vel_std',   0.05))
         self.sensor_att_std   = float(getattr(config, 'sensor_att_std',   0.005))
         self.sensor_omega_std = float(getattr(config, 'sensor_omega_std', 0.0005))
@@ -129,24 +136,27 @@ class HoverTask(BaseTask):
         F_head, F_rf, F_lb, F_lf, F_rb = env.model.get_F()
 
         # Zero-mean Gaussian sensor noise on the observation path only.
-        # Position noise is added to (npos, epos, altitude) before computing
-        # delta-to-target (target is constant, so this equals additive noise
-        # on delta).
+        # Position noise is added only when position channels are present.
         if add_sensor_noise:
-            npos     = npos     + torch.randn_like(npos)     * self.sensor_pos_std
-            epos     = epos     + torch.randn_like(epos)     * self.sensor_pos_std
-            altitude = altitude + torch.randn_like(altitude) * self.sensor_pos_std
+            if self.include_position_obs:
+                npos     = npos     + torch.randn_like(npos)     * self.sensor_xy_pos_std
+                epos     = epos     + torch.randn_like(epos)     * self.sensor_xy_pos_std
+                altitude = altitude + torch.randn_like(altitude) * self.sensor_alt_std
             roll, pitch, heading, vx, vy, vz, P, Q, R = self._apply_sensor_noise(
                 roll, pitch, heading, vx, vy, vz, P, Q, R)
             vt = torch.sqrt((vx * vx + vy * vy + vz * vz).clamp_min(0.0))
 
-        delta_n   = (self.target_npos     - npos     ).reshape(-1, 1) / self.pos_norm
-        delta_e   = (self.target_epos     - epos     ).reshape(-1, 1) / self.pos_norm
-        delta_alt = (self.target_altitude - altitude ).reshape(-1, 1) / self.alt_norm
         delta_yaw = wrap_PI((self.target_heading - heading).reshape(-1, 1)) / torch.pi
 
-        obs = torch.hstack((
-            delta_n, delta_e, delta_alt, delta_yaw,
+        obs_parts = []
+        if self.include_position_obs:
+            delta_n   = (self.target_npos     - npos     ).reshape(-1, 1) / self.pos_norm
+            delta_e   = (self.target_epos     - epos     ).reshape(-1, 1) / self.pos_norm
+            delta_alt = (self.target_altitude - altitude ).reshape(-1, 1) / self.alt_norm
+            obs_parts.extend([delta_n, delta_e, delta_alt])
+
+        obs_parts.extend([
+            delta_yaw,
             torch.sin(roll).reshape(-1, 1),  torch.cos(roll).reshape(-1, 1),
             torch.sin(pitch).reshape(-1, 1), torch.cos(pitch).reshape(-1, 1),
             (vt / 10.0).reshape(-1, 1),
@@ -156,12 +166,13 @@ class HoverTask(BaseTask):
             P.reshape(-1, 1), Q.reshape(-1, 1), R.reshape(-1, 1),
             sa.reshape(-1, 1), ca.reshape(-1, 1),
             sb.reshape(-1, 1), cb.reshape(-1, 1),
-            (F_head / 7.0).reshape(-1, 1),
-            (F_rf   / 7.0).reshape(-1, 1),
-            (F_lb   / 7.0).reshape(-1, 1),
-            (F_lf   / 7.0).reshape(-1, 1),
-            (F_rb   / 7.0).reshape(-1, 1),
-        ))
+            (F_head / self.force_norm).reshape(-1, 1),
+            (F_rf   / self.force_norm).reshape(-1, 1),
+            (F_lb   / self.force_norm).reshape(-1, 1),
+            (F_lf   / self.force_norm).reshape(-1, 1),
+            (F_rb   / self.force_norm).reshape(-1, 1),
+        ])
+        obs = torch.hstack(tuple(obs_parts))
         return obs
 
     def get_obs(self, env):

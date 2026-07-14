@@ -81,40 +81,13 @@ class RCHumanTask(BaseTask):
         self.easy_stick = float(getattr(config, 'rc_human_easy_stick', 0.25))
         self.medium_stick = float(getattr(config, 'rc_human_medium_stick', 0.65))
         self.hard_stick = float(getattr(config, 'rc_human_hard_stick', 1.0))
-        self.command_transient_grace_steps = int(
-            getattr(config, 'rc_human_command_transient_grace_steps', 60)
-        )
-        self.command_transient_threshold = float(
-            getattr(config, 'rc_human_command_transient_threshold', 0.20)
-        )
         self.mode3_reverse_axes = max(
             1, min(4, int(getattr(config, 'rc_human_mode3_reverse_axes', 1)))
-        )
-        self.large_command_transient_grace_steps = int(
-            getattr(
-                config,
-                'rc_human_large_command_transient_grace_steps',
-                getattr(config, 'rc_human_reversal_transient_grace_steps',
-                        self.command_transient_grace_steps),
-            )
-        )
-        self.large_command_transient_delta = float(
-            getattr(config, 'rc_human_large_command_transient_delta', 1.0)
-        )
-        self.command_reversal_threshold = float(
-            getattr(
-                config,
-                'rc_human_command_reversal_threshold',
-                0.1,
-            )
         )
         self.command_rate_limit_frac = max(0.0, float(os.environ.get(
             'RC_HUMAN_COMMAND_RATE_LIMIT_FRAC',
             getattr(config, 'rc_human_command_rate_limit_frac', 0.0),
         )))
-        self.success_ignore_transient = bool(
-            getattr(config, 'rc_human_success_ignore_transient', True)
-        )
         self.mode5_hold_min_steps = int(
             getattr(config, 'rc_human_mode5_hold_min_steps', 75)
         )
@@ -133,6 +106,10 @@ class RCHumanTask(BaseTask):
         self.success_vel_error = float(getattr(config, 'rc_human_success_vel_error', 0.35))
         self.success_yaw_error = float(getattr(config, 'rc_human_success_yaw_error', 0.18))
         self.success_attitude_error = float(getattr(config, 'rc_human_success_attitude_error', 0.22))
+        self.success_use_yaw_attitude = bool(
+            getattr(config, 'rc_human_success_use_yaw_attitude', True)
+        )
+        self.success_vel_error_by_mode = self._success_vel_error_by_mode(config)
         self.alt_high = float(getattr(config, 'rc_human_alt_high', 95.0))
         self.alt_low = float(getattr(config, 'rc_human_alt_low', 5.0))
         self.altitude_aware_vz_enable = bool(
@@ -175,7 +152,6 @@ class RCHumanTask(BaseTask):
             (self.n,), self.vx_forward_easy_max, device=self.device
         )
         self.dwell_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
-        self.command_transient_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.mode5_release_state = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.mode5_hold_elapsed = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.mode5_recovery_left = torch.zeros(self.n, dtype=torch.long, device=self.device)
@@ -197,7 +173,6 @@ class RCHumanTask(BaseTask):
         self.episode_yaw_error_sum = torch.zeros(self.n, device=self.device)
         self.episode_attitude_error_sum = torch.zeros(self.n, device=self.device)
         self.episode_metric_count = torch.zeros(self.n, device=self.device)
-        self.episode_metric_skipped_count = torch.zeros(self.n, device=self.device)
         self.last_reward_terms = {}
 
         self.reward_functions = [
@@ -235,6 +210,15 @@ class RCHumanTask(BaseTask):
         if len(set(values)) != len(values):
             raise ValueError(f'RC_HUMAN_MODE_ORDER contains duplicates: {values}')
         return values
+
+    def _success_vel_error_by_mode(self, config):
+        values = []
+        for mode_id in range(6):
+            env_key = f'RC_HUMAN_SUCCESS_VEL_ERROR_MODE{mode_id}'
+            cfg_key = f'rc_human_success_vel_error_mode{mode_id}'
+            raw = os.environ.get(env_key, getattr(config, cfg_key, self.success_vel_error))
+            values.append(float(raw))
+        return torch.tensor(values, dtype=torch.float32, device=self.device)
 
     def reset(self, env):
         reset = (env.is_done.bool() | env.bad_done.bool()) | env.exceed_time_limit.bool()
@@ -276,7 +260,6 @@ class RCHumanTask(BaseTask):
         self.command_raw_delta[reset] = 0.0
         self.vx_forward_limit[reset] = self.vx_forward_easy_max
         self.dwell_left[reset] = 0
-        self.command_transient_left[reset] = 0
         self.mode5_release_state[reset] = 0
         self.mode5_hold_elapsed[reset] = 0
         self.mode5_recovery_left[reset] = 0
@@ -287,7 +270,6 @@ class RCHumanTask(BaseTask):
         self.episode_yaw_error_sum[reset] = 0.0
         self.episode_attitude_error_sum[reset] = 0.0
         self.episode_metric_count[reset] = 0.0
-        self.episode_metric_skipped_count[reset] = 0.0
 
     def step(self, env):
         self.sync_command(env)
@@ -391,13 +373,6 @@ class RCHumanTask(BaseTask):
                 0.35 + 0.65 * torch.rand(int(combined.sum().item()), 4, device=d)
             ) * amp[combined].reshape(-1, 1) * signs[combined]
 
-        prev_raw = torch.stack((
-            self.desired_raw_vx[idx],
-            self.desired_raw_vy[idx],
-            self.desired_raw_vz[idx],
-            self.desired_raw_yaw[idx],
-        ), dim=1)
-
         # 5 release: hold a level-dependent forward stick until the aircraft is
         # near the requested speed or a timeout is reached.  The actual release
         # to centered sticks is handled by _update_mode5_release_state().
@@ -432,31 +407,6 @@ class RCHumanTask(BaseTask):
             self.mode5_recovery_left[non_release_idx] = 0
             self.mode5_pre_release_raw[non_release_idx] = 0.0
 
-        delta_raw = torch.max(torch.abs(values - prev_raw), dim=1).values
-        reversal = (
-            (torch.abs(prev_raw) > self.command_reversal_threshold)
-            & (torch.abs(values) > self.command_reversal_threshold)
-            & (prev_raw * values < 0.0)
-        )
-        large_transient = (
-            (delta_raw >= self.large_command_transient_delta)
-            | torch.any(reversal, dim=1)
-        )
-        changed = delta_raw > self.command_transient_threshold
-        if torch.any(changed):
-            grace_steps = torch.full(
-                (size,),
-                max(self.command_transient_grace_steps, 0),
-                dtype=torch.long,
-                device=d,
-            )
-            grace_steps[large_transient] = max(
-                self.large_command_transient_grace_steps,
-                self.command_transient_grace_steps,
-                0,
-            )
-            self.command_transient_left[idx[changed]] = grace_steps[changed]
-
         self.desired_raw_vx[mask] = torch.clamp(values[:, 0], -1.0, 1.0)
         self.desired_raw_vy[mask] = torch.clamp(values[:, 1], -1.0, 1.0)
         self.desired_raw_vz[mask] = torch.clamp(values[:, 2], -1.0, 1.0)
@@ -490,12 +440,17 @@ class RCHumanTask(BaseTask):
         mean_attitude_error = self.episode_attitude_error_sum[finished] / count
 
         clean_done = env.is_done[finished].bool() & (~env.bad_done[finished].bool())
-        accurate = (
-            (mean_vel_error < self.success_vel_error)
-            & (mean_attitude_error < self.success_attitude_error)
+        mode_for_threshold = torch.clamp(
+            self.operation_mode[finished].long(),
+            0,
+            int(self.success_vel_error_by_mode.numel()) - 1,
         )
-        if self.yaw_tracking_enable:
-            accurate = accurate & (mean_yaw_error < self.success_yaw_error)
+        vel_threshold = self.success_vel_error_by_mode[mode_for_threshold]
+        accurate = mean_vel_error < vel_threshold
+        if self.success_use_yaw_attitude:
+            accurate = accurate & (mean_attitude_error < self.success_attitude_error)
+            if self.yaw_tracking_enable:
+                accurate = accurate & (mean_yaw_error < self.success_yaw_error)
         success = clean_done & accurate
         idx = torch.where(finished)[0]
 
@@ -583,16 +538,10 @@ class RCHumanTask(BaseTask):
         return sampled
 
     def update_episode_metrics(self, vel_error, yaw_error, attitude_error):
-        valid = torch.ones_like(vel_error, dtype=torch.bool, device=self.device)
-        if self.success_ignore_transient:
-            valid = valid & (self.command_transient_left <= 0)
-
-        valid_f = valid.detach().float()
-        self.episode_error_sum += vel_error.detach() * valid_f
-        self.episode_yaw_error_sum += torch.abs(yaw_error.detach()) * valid_f
-        self.episode_attitude_error_sum += attitude_error.detach() * valid_f
-        self.episode_metric_count += valid_f
-        self.episode_metric_skipped_count += (~valid).detach().float()
+        self.episode_error_sum += vel_error.detach()
+        self.episode_yaw_error_sum += torch.abs(yaw_error.detach())
+        self.episode_attitude_error_sum += attitude_error.detach()
+        self.episode_metric_count += torch.ones_like(vel_error)
 
     def get_training_metrics(self):
         count = torch.clamp(self.episode_metric_count, min=1.0)
@@ -611,6 +560,13 @@ class RCHumanTask(BaseTask):
             'rc_human/tracking_vel_error_mean': mean_vel_error.mean(),
             'rc_human/tracking_yaw_error_mean': mean_yaw_error.mean(),
             'rc_human/tracking_attitude_error_mean': mean_attitude_error.mean(),
+            'rc_human/success_use_yaw_attitude': torch.tensor(
+                float(self.success_use_yaw_attitude), device=self.device),
+            'rc_human/success_vel_error_threshold_mean': (
+                self.success_vel_error_by_mode[
+                    torch.clamp(self.operation_mode.long(), 0, 5)
+                ].mean()
+            ),
             'rc_human/mix_current': torch.tensor(
                 self.mix_current, device=self.device),
             'rc_human/mix_easy_replay': torch.tensor(
@@ -620,18 +576,12 @@ class RCHumanTask(BaseTask):
             'rc_human/mix_random_replay': torch.tensor(
                 self.mix_random, device=self.device),
         }
-        metric_total = self.episode_metric_count + self.episode_metric_skipped_count
-        metrics['rc_human/success_metric_valid_fraction'] = (
-            self.episode_metric_count / torch.clamp(metric_total, min=1.0)
-        ).mean()
-        metrics['rc_human/success_metric_skipped_fraction'] = (
-            self.episode_metric_skipped_count / torch.clamp(metric_total, min=1.0)
-        ).mean()
         for mode_id in range(6):
             metrics[f'rc_human/mode_{mode_id}_fraction'] = (
                 self.operation_mode == mode_id).float().mean()
-        metrics['rc_human/command_transient_fraction'] = (
-            self.command_transient_left > 0).float().mean()
+            metrics[f'rc_human/success_vel_error_mode_{mode_id}'] = (
+                self.success_vel_error_by_mode[mode_id]
+            )
         metrics['rc_human/command_rate_limit_frac'] = torch.tensor(
             float(self.command_rate_limit_frac), device=self.device)
         metrics['rc_human/command_rate_limited_fraction'] = (
@@ -921,11 +871,6 @@ class RCHumanTask(BaseTask):
                     self.mode5_release_recovery_steps,
                     1,
                 )
-                self.command_transient_left[release_idx] = max(
-                    self.command_transient_grace_steps,
-                    self.mode5_release_recovery_steps,
-                    0,
-                )
 
         active_released = mask & (self.mode5_release_state == 2)
         if torch.any(active_released):
@@ -948,8 +893,6 @@ class RCHumanTask(BaseTask):
         self._apply_raw_stick_rate_limit(mask)
         self._apply_altitude_raw_vz_guard(mask, env)
         self.dwell_left[mask] = torch.clamp(self.dwell_left[mask] - 1, min=0)
-        self.command_transient_left[mask] = torch.clamp(
-            self.command_transient_left[mask] - 1, min=0)
 
         self._apply_px4_vtol_mc_manual_sticks(mask, env)
 

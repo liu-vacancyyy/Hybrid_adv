@@ -167,7 +167,7 @@ def final_frame_candidates(summary, trace):
         suffixes=("", "_ep"),
     )
     final["vx_limit_final"] = np.maximum(0.75, np.abs(final["target_vx"]) * 0.25)
-    final["velocity_tracking_active_final"] = final["command_transient_left"] <= 0
+    final["velocity_tracking_active_final"] = True
     final["candidate_tracking_velocity"] = final["velocity_tracking_active_final"] & (
         (final["vx_abs_err"] > final["vx_limit_final"])
         | (final["vy_abs_err"] > 0.5)

@@ -7,6 +7,7 @@ from models.UAV_model import UAVModel
 from models.hybrid_model import HybridModel
 from models.hybrid_model_new import HybridModelNew, HybridModelNewNoForward
 from models.simulink_model import SimulinkModel
+from models.gazebo_model import GazeboModel
 from tasks.heading_task import HeadingTask
 from tasks.control_task import ControlTask
 from tasks.tracking_task import TrackingTask
@@ -16,6 +17,7 @@ from tasks.rpy_throttle_human_task import RPYThrottleHumanTask
 from tasks.rpy_throttle_reach_task import RPYThrottleReachTask
 from tasks.simulink_task import SimulinkTask
 from tasks.hover_task import HoverTask
+from tasks.velocity_hover_task import VelocityHoverTask
 from tasks.circle_task import CircleTask
 
 class ControlEnv(BaseEnv):
@@ -38,6 +40,8 @@ class ControlEnv(BaseEnv):
             self.model = HybridModelNew(self.config, self.n, self.device, random_seed)
         elif model == 'HYBRID_NEW_NO_FORWARD':
             self.model = HybridModelNewNoForward(self.config, self.n, self.device, random_seed)
+        elif model in ('GAZEBO', 'Gazebo', 'GAZEBO_VTOL'):
+            self.model = GazeboModel(self.config, self.n, self.device, random_seed)
         elif model == 'Simulink':
             self.model = SimulinkModel(self.config, self.n, self.device, random_seed)
         else:
@@ -62,6 +66,8 @@ class ControlEnv(BaseEnv):
             self.task = SimulinkTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'hover':
             self.task = HoverTask(self.config, self.n, self.device, random_seed)
+        elif task_name == 'velocity_hover':
+            self.task = VelocityHoverTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'circle':
             self.task = CircleTask(self.config, self.n, self.device, random_seed)
         else:

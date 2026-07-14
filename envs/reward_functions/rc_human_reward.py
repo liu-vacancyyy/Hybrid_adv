@@ -54,6 +54,26 @@ class RCHumanReward(BaseRewardFunction):
         self.overshoot_deadband = float(getattr(config, 'rc_human_overshoot_deadband', 0.05))
         self.w_adaptive_damping = float(getattr(config, 'rc_human_w_adaptive_damping', 0.0))
         self.adaptive_damping_gain = float(getattr(config, 'rc_human_adaptive_damping_gain', 4.0))
+        self.w_speed_margin = float(getattr(config, 'rc_human_w_speed_margin', 0.0))
+        self.speed_margin_start = float(
+            getattr(config, 'rc_human_speed_margin_start', 3.0 ** 0.5)
+        )
+        self.speed_margin_scale = max(
+            float(getattr(config, 'rc_human_speed_margin_scale', 1.0)),
+            1e-6,
+        )
+        self.w_attitude_margin = float(getattr(config, 'rc_human_w_attitude_margin', 0.0))
+        self.roll_margin_start = float(
+            getattr(config, 'rc_human_roll_margin_start_deg', 20.0)
+        ) * torch.pi / 180.0
+        self.pitch_margin_start = float(
+            getattr(config, 'rc_human_pitch_margin_start_deg', 15.0)
+        ) * torch.pi / 180.0
+        self.attitude_margin_scale = max(
+            float(getattr(config, 'rc_human_attitude_margin_scale_deg', 5.0))
+            * torch.pi / 180.0,
+            1e-6,
+        )
 
     def get_reward(self, task, env):
         task.sync_command(env)
@@ -62,6 +82,7 @@ class RCHumanReward(BaseRewardFunction):
         p, q, r = env.model.get_angular_velocity()
         vx_n, vy_e = env.model.get_ground_speed()
         vz = env.model.get_climb_rate()
+        tas = env.model.get_TAS()
 
         dvx, dvy = task.heading_local_velocity_error(vx_n, vy_e, heading)
         dvz = vz - task.target_vz
@@ -172,6 +193,34 @@ class RCHumanReward(BaseRewardFunction):
             proximity = torch.zeros_like(reward)
             reward_adaptive_damping = torch.zeros_like(reward)
 
+        if self.w_speed_margin > 0.0:
+            speed_excess = torch.clamp(
+                (tas - self.speed_margin_start) / self.speed_margin_scale,
+                min=0.0,
+            )
+            reward_speed_margin = -self.w_speed_margin * speed_excess * speed_excess
+            reward = reward + reward_speed_margin
+        else:
+            speed_excess = torch.zeros_like(reward)
+            reward_speed_margin = torch.zeros_like(reward)
+
+        if self.w_attitude_margin > 0.0:
+            roll_excess = torch.clamp(
+                (torch.abs(roll) - self.roll_margin_start) / self.attitude_margin_scale,
+                min=0.0,
+            )
+            pitch_excess = torch.clamp(
+                (torch.abs(pitch) - self.pitch_margin_start) / self.attitude_margin_scale,
+                min=0.0,
+            )
+            attitude_margin = roll_excess * roll_excess + pitch_excess * pitch_excess
+            reward_attitude_margin = -self.w_attitude_margin * attitude_margin
+            reward = reward + reward_attitude_margin
+        else:
+            roll_excess = torch.zeros_like(reward)
+            pitch_excess = torch.zeros_like(reward)
+            reward_attitude_margin = torch.zeros_like(reward)
+
         if self.w_smooth > 0.0:
             delta_u = env.model.u - env.model.recent_u
             delta_u_sq = torch.sum(delta_u * delta_u, dim=1)
@@ -189,6 +238,8 @@ class RCHumanReward(BaseRewardFunction):
             'reward/rel_precision_mean': reward_rel_precision.detach().mean(),
             'reward/overshoot_mean': reward_overshoot.detach().mean(),
             'reward/adaptive_damping_mean': reward_adaptive_damping.detach().mean(),
+            'reward/speed_margin_mean': reward_speed_margin.detach().mean(),
+            'reward/attitude_margin_mean': reward_attitude_margin.detach().mean(),
             'reward/yaw_mean': reward_yaw.detach().mean(),
             'reward/yaw_rate_mean': reward_yaw_rate.detach().mean(),
             'reward/attitude_mean': reward_attitude.detach().mean(),
@@ -200,6 +251,9 @@ class RCHumanReward(BaseRewardFunction):
             'reward/raw_rel_precision_mean': r_rel_precision.detach().mean(),
             'reward/raw_overshoot_rel_mean': overshoot_rel.detach().mean(),
             'reward/raw_damping_proximity_mean': proximity.detach().mean(),
+            'reward/raw_speed_margin_excess_mean': speed_excess.detach().mean(),
+            'reward/raw_roll_margin_excess_mean': roll_excess.detach().mean(),
+            'reward/raw_pitch_margin_excess_mean': pitch_excess.detach().mean(),
             'reward/raw_yaw_error_abs_mean': torch.abs(dyaw_reward).detach().mean(),
             'reward/raw_yaw_rate_abs_mean': torch.abs(r).detach().mean(),
         }

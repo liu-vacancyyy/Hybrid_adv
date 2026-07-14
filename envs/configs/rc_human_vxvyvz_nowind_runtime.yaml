@@ -107,13 +107,8 @@ rc_human_mix_random_replay: 0.15
 rc_human_easy_stick: 0.25
 rc_human_medium_stick: 0.65
 rc_human_hard_stick: 1.0
-rc_human_command_transient_grace_steps: 60
-rc_human_command_transient_threshold: 0.2
 rc_human_mode3_reverse_axes: 1
 rc_human_command_rate_limit_frac: 0.05
-rc_human_command_reversal_threshold: 0.1
-rc_human_large_command_transient_delta: 1.0
-rc_human_large_command_transient_grace_steps: 100
 rc_human_mode5_hold_min_steps: 75
 rc_human_mode5_hold_max_steps: 250
 rc_human_mode5_release_recovery_steps: 150
@@ -122,7 +117,6 @@ rc_human_mode5_release_target_frac: 0.8
 rc_human_success_vel_error: 0.75
 rc_human_success_yaw_error: 0.3
 rc_human_success_attitude_error: 0.35
-rc_human_success_ignore_transient: true
 rc_human_tracking_bad_done_enable: false
 rc_human_vxyvz_dynamic_bad_done_enable: false
 rc_human_vxyvz_dynamic_bad_done_margin: 0.5
@@ -133,7 +127,6 @@ rc_human_bad_done_vx_error_min: 0.75
 rc_human_bad_done_vx_error_frac: 0.25
 rc_human_bad_done_vy_error: 0.5
 rc_human_bad_done_vz_error: 0.5
-rc_human_bad_done_grace_steps: 50
 rc_human_bad_done_persist_steps: 10
 rc_human_alt_high: 10.0
 rc_human_alt_low: 0.5

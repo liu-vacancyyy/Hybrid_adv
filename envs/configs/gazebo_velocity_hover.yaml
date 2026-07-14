@@ -1,0 +1,104 @@
+# GazeboModel velocity-hover training config.
+# Upper-level command is fixed to vx=vy=vz=0; the policy tracks those velocity
+# commands without using position observations or position rewards.
+
+task_name: velocity_hover
+model: gazebo
+
+# Atmosphere / integration
+airspeed: 0.0
+noise_scale: 0.01
+solver: euler
+dt: 0.02
+max_steps: 1500
+num_agents: 1
+num_states: 12
+num_controls: 8
+num_actions: 5
+num_observation: 27
+
+# Gazebo Classic standard_vtol reference parameters.
+gazebo_mass: 5.0
+gazebo_Jx: 0.477708333333
+gazebo_Jy: 0.341666666667
+gazebo_Jz: 0.811041666667
+gazebo_g: 9.807
+gazebo_air_density: 1.2041
+gazebo_motor_tau_up: 0.0125
+gazebo_motor_tau_down: 0.025
+gazebo_rotor_drag_coefficient: 0.000106428
+gazebo_rolling_moment_coefficient: 0.000001
+
+# Termination limits
+altitude_limit: 0.5
+acceleration_limit: 5.0
+max_velocity: 10.0
+min_y_velocity: 0.0
+# Alpha / beta bad_done limits are in degrees.
+min_alpha: -45
+max_alpha: 45
+min_beta: -30
+max_beta: 30
+max_omega: 2.0
+max_pitch: 30
+max_roll: 30
+termination_verbose: false
+color: Blue
+
+# Fixed upper-level velocity command.
+velocity_hover_target_vx: 0.0
+velocity_hover_target_vy: 0.0
+velocity_hover_target_vz: 0.0
+velocity_hover_include_command_obs: true
+velocity_hover_vx_norm: 1.0
+velocity_hover_vy_norm: 1.0
+velocity_hover_vz_norm: 1.0
+velocity_hover_vt_norm: 5.0
+hover_force_norm: 15.0
+
+# No mass / inertia randomization for this first policy.
+dr_mass: 0.0
+dr_inertia: 0.0
+
+# Initial-state randomization: altitude and yaw only.
+min_altitude: 2.0
+max_altitude: 8.0
+init_roll_range: 0.0
+init_pitch_range: 0.0
+init_yaw_range: 3.14159265359
+init_vel_range: 0.0
+init_omega_range: 0.0
+
+# Observation noise: no position observations; keep velocity / attitude / rate.
+enable_sensor_noise: true
+sensor_pos_std: 0.0
+sensor_xy_pos_std: 0.0
+sensor_alt_std: 0.0
+sensor_vel_std: 0.05
+sensor_att_std: 0.003
+sensor_omega_std: 0.0003394
+
+# Wind stays off until nominal zero-velocity hover is stable.
+enable_wind: false
+enable_dryden_turbulence: false
+
+# Dense velocity-hover reward.
+velocity_hover_w_alive: 0.2
+velocity_hover_w_vel: 4.0
+velocity_hover_w_yaw: 0.4
+velocity_hover_w_attitude: 1.0
+velocity_hover_w_omega: 0.6
+velocity_hover_w_smooth: 0.4
+
+velocity_hover_sig_vx: 0.25
+velocity_hover_sig_vy: 0.25
+velocity_hover_sig_vz: 0.20
+velocity_hover_sig_yaw: 0.35
+velocity_hover_sig_attitude: 0.18
+velocity_hover_sig_omega: 0.8
+velocity_hover_sig_smooth: 0.20
+velocity_hover_smooth_norm: 1500.0
+
+velocity_hover_bad_done_base: 50.0
+velocity_hover_bad_done_per_step: 3.0
+max_check_interval: 1000

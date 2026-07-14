@@ -80,7 +80,9 @@ class ReplayBuffer(Buffer):
         self.rnn_states_actor = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents,
                                           self.recurrent_hidden_layers, self.recurrent_hidden_size), dtype=np.float32)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
-        self.rnn_states_cost_critic = np.zeros_like(self.rnn_states_actor)
+        self.rnn_states_cost_critic = (
+            np.zeros_like(self.rnn_states_actor) if self.use_cost_constraints else None
+        )
         self.safety_targets = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         self.safety_valid = np.zeros_like(self.safety_targets, dtype=np.float32)
 
@@ -154,7 +156,8 @@ class ReplayBuffer(Buffer):
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.rnn_states_actor[0] = self.rnn_states_actor[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
-        self.rnn_states_cost_critic[0] = self.rnn_states_cost_critic[-1].copy()
+        if self.rnn_states_cost_critic is not None:
+            self.rnn_states_cost_critic[0] = self.rnn_states_cost_critic[-1].copy()
 
     def clear(self):
         self.step = 0
@@ -171,7 +174,8 @@ class ReplayBuffer(Buffer):
         self.cost_returns = np.zeros_like(self.cost_returns, dtype=np.float32)
         self.rnn_states_actor = np.zeros_like(self.rnn_states_critic)
         self.rnn_states_critic = np.zeros_like(self.rnn_states_actor)
-        self.rnn_states_cost_critic = np.zeros_like(self.rnn_states_cost_critic)
+        if self.rnn_states_cost_critic is not None:
+            self.rnn_states_cost_critic = np.zeros_like(self.rnn_states_cost_critic)
         self.safety_targets = np.zeros_like(self.safety_targets, dtype=np.float32)
         self.safety_valid = np.zeros_like(self.safety_valid, dtype=np.float32)
 

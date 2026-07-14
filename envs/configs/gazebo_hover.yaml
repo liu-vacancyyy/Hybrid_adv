@@ -1,0 +1,102 @@
+# Hover task config for GazeboModel using PX4 Gazebo/GZ-inspired defaults.
+# PX4 Gazebo keeps mass, inertia and spawn pose fixed. For the first hover
+# policy, only spawn altitude and yaw are randomized.
+
+task_name: hover
+model: gazebo
+
+# Atmosphere / integration
+airspeed: 0.0
+noise_scale: 0.01
+solver: euler
+dt: 0.02
+max_steps: 1500
+num_agents: 1
+num_states: 12
+num_controls: 8
+num_actions: 5
+num_observation: 21
+
+# Gazebo Classic standard_vtol reference parameters.
+gazebo_mass: 5.0
+gazebo_Jx: 0.477708333333
+gazebo_Jy: 0.341666666667
+gazebo_Jz: 0.811041666667
+gazebo_g: 9.807
+gazebo_air_density: 1.2041
+gazebo_motor_tau_up: 0.0125
+gazebo_motor_tau_down: 0.025
+gazebo_rotor_drag_coefficient: 0.000106428
+gazebo_rolling_moment_coefficient: 0.000001
+
+# Termination limits
+altitude_limit: 0.2
+acceleration_limit: 5.0
+max_velocity: 10.0
+min_y_velocity: 0.0
+min_alpha: -45
+max_alpha: 45
+min_beta: -30
+max_beta: 30
+max_omega: 2.0
+max_pitch: 35
+max_roll: 35
+color: Blue
+
+# Hover observation scaling.
+hover_include_position_obs: false
+hover_pos_norm: 5.0
+hover_alt_norm: 2.0
+hover_force_norm: 15.0
+
+# Mass / inertia randomization disabled for the first Gazebo hover run.
+dr_mass: 0.0
+dr_inertia: 0.0
+
+# Initial-state randomization: altitude and yaw only.
+min_altitude: 2.0
+max_altitude: 8.0
+init_roll_range: 0.0
+init_pitch_range: 0.0
+init_yaw_range: 3.14159265359
+init_vel_range: 0.0
+init_omega_range: 0.0
+
+# Observation noise mapped from PX4 Gazebo sensors/bridge behavior.
+# PX4 GZ has IMU/baro/mag SDF noise and GPS Markov/random-walk noise, but no
+# direct white noise on groundtruth pose. Position observations are disabled;
+# keep only velocity / attitude / angular-rate noise.
+enable_sensor_noise: true
+sensor_pos_std: 0.0
+sensor_xy_pos_std: 0.0
+sensor_alt_std: 0.0
+sensor_vel_std: 0.05
+sensor_att_std: 0.003
+sensor_omega_std: 0.0003394
+
+# Wind is not enabled in GazeboModel yet. Keep the PPO baseline aligned with
+# PX4's default no-random-wind spawn, then add wind after nominal hover works.
+enable_wind: false
+enable_dryden_turbulence: false
+
+# Hover reward
+hover_w_alive: 0.2
+hover_w_xy: 3.0
+hover_w_alt: 1.5
+hover_w_yaw: 0.8
+hover_w_attitude: 1.0
+hover_w_vel: 1.0
+hover_w_omega: 0.5
+hover_w_smooth: 0.4
+
+hover_sig_xy: 1.5
+hover_sig_alt: 0.5
+hover_sig_yaw: 0.2
+hover_sig_attitude: 0.2
+hover_sig_vel: 1.5
+hover_sig_omega: 1.5
+hover_sig_smooth: 500.0
+
+hover_bad_done_base: 50.0
+hover_bad_done_per_step: 3.0
+max_check_interval: 1000

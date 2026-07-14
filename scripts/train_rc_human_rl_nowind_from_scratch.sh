@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# PPO-GRU training for rc_human from scratch with all wind effects disabled.
+# PPO-GRU training for rc_human from scratch with all wind effects disabled by
+# default. Set RC_HUMAN_RANDOM_WIND_ENABLE=1 to generate the same runtime config
+# with randomized Dryden wind enabled; this keeps existing no-wind callers
+# unchanged while allowing wind-specific wrappers to share the same overrides.
 #
 # This is a clean normal-training baseline:
 #   - no adversary
@@ -74,7 +77,7 @@ for arg in "$@"; do
             exit 2
             ;;
         --scenario-name|--scenario-name=*)
-            echo "Do not pass ${arg}: this script must use the generated no-wind scenario ${SCENARIO_NAME}." >&2
+            echo "Do not pass ${arg}: this script must use the generated runtime scenario ${SCENARIO_NAME}." >&2
             exit 2
             ;;
         --model-dir|--model-dir=*|--init-actor-ckpt|--init-actor-ckpt=*)
@@ -110,60 +113,83 @@ out_path = Path(sys.argv[2])
 with base_path.open("r", encoding="utf-8") as f:
     data = yaml.load(f, Loader=yaml.FullLoader)
 
-false_keys = [
-    "enable_wind",
-    "enable_dryden_turbulence",
-    "dryden_randomize",
-    "dryden_domain_randomization",
-    "dryden_sigma_curriculum_enable",
-    "dryden_mean_wind_curriculum_enable",
-    "enable_dryden_angular_turbulence",
-    "wind_drag_enable",
-    "wind_pqr_torque_enable",
-]
-for key in false_keys:
-    data[key] = False
+def env_bool(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
-zero_keys = [
-    "wind_north",
-    "wind_east",
-    "wind_down",
-    "gust_north",
-    "gust_east",
-    "gust_down",
-    "dryden_sigma_ref",
-    "dryden_sigma_ref_min",
-    "dryden_sigma_ref_max",
-    "dryden_sigma_scale_min",
-    "dryden_sigma_scale_max",
-    "dryden_mean_wind_scale_min",
-    "dryden_mean_wind_scale_max",
-    "dryden_mean_wind_north_min",
-    "dryden_mean_wind_north_max",
-    "dryden_mean_wind_east_min",
-    "dryden_mean_wind_east_max",
-    "dryden_mean_wind_down_min",
-    "dryden_mean_wind_down_max",
-    "dryden_pqr_sigma_ref",
-    "dryden_pqr_sigma_scale_min",
-    "dryden_pqr_sigma_scale_max",
-    "dryden_pqr_attack_p_max",
-    "dryden_pqr_attack_q_max",
-    "dryden_pqr_attack_r_max",
-    "wind_body_cda_x",
-    "wind_body_cda_y",
-    "wind_body_cda_z",
-    "wind_cp_x",
-    "wind_cp_y",
-    "wind_cp_z",
-    "wind_pqr_accel_gain_p",
-    "wind_pqr_accel_gain_q",
-    "wind_pqr_accel_gain_r",
-    "wind_force_clip",
-    "wind_moment_clip",
-]
-for key in zero_keys:
-    data[key] = 0.0
+
+random_wind = env_bool("RC_HUMAN_RANDOM_WIND_ENABLE", False)
+if random_wind:
+    true_keys = [
+        "enable_wind",
+        "enable_dryden_turbulence",
+        "dryden_randomize",
+        "dryden_domain_randomization",
+        "dryden_sigma_curriculum_enable",
+        "dryden_mean_wind_curriculum_enable",
+        "enable_dryden_angular_turbulence",
+        "wind_drag_enable",
+        "wind_pqr_torque_enable",
+    ]
+    for key in true_keys:
+        data[key] = True
+else:
+    false_keys = [
+        "enable_wind",
+        "enable_dryden_turbulence",
+        "dryden_randomize",
+        "dryden_domain_randomization",
+        "dryden_sigma_curriculum_enable",
+        "dryden_mean_wind_curriculum_enable",
+        "enable_dryden_angular_turbulence",
+        "wind_drag_enable",
+        "wind_pqr_torque_enable",
+    ]
+    for key in false_keys:
+        data[key] = False
+
+    zero_keys = [
+        "wind_north",
+        "wind_east",
+        "wind_down",
+        "gust_north",
+        "gust_east",
+        "gust_down",
+        "dryden_sigma_ref",
+        "dryden_sigma_ref_min",
+        "dryden_sigma_ref_max",
+        "dryden_sigma_scale_min",
+        "dryden_sigma_scale_max",
+        "dryden_mean_wind_scale_min",
+        "dryden_mean_wind_scale_max",
+        "dryden_mean_wind_north_min",
+        "dryden_mean_wind_north_max",
+        "dryden_mean_wind_east_min",
+        "dryden_mean_wind_east_max",
+        "dryden_mean_wind_down_min",
+        "dryden_mean_wind_down_max",
+        "dryden_pqr_sigma_ref",
+        "dryden_pqr_sigma_scale_min",
+        "dryden_pqr_sigma_scale_max",
+        "dryden_pqr_attack_p_max",
+        "dryden_pqr_attack_q_max",
+        "dryden_pqr_attack_r_max",
+        "wind_body_cda_x",
+        "wind_body_cda_y",
+        "wind_body_cda_z",
+        "wind_cp_x",
+        "wind_cp_y",
+        "wind_cp_z",
+        "wind_pqr_accel_gain_p",
+        "wind_pqr_accel_gain_q",
+        "wind_pqr_accel_gain_r",
+        "wind_force_clip",
+        "wind_moment_clip",
+    ]
+    for key in zero_keys:
+        data[key] = 0.0
 
 data["task_name"] = "rc_human"
 mode_order = os.environ.get("RC_HUMAN_MODE_ORDER")
@@ -179,9 +205,17 @@ yaw_reward_mode = os.environ.get("RC_HUMAN_YAW_REWARD_MODE")
 if yaw_reward_mode:
     data["rc_human_yaw_reward_mode"] = yaw_reward_mode
 for env_key, data_key in [
+    ("RC_HUMAN_ENABLE_WIND", "enable_wind"),
+    ("RC_HUMAN_ENABLE_DRYDEN_TURBULENCE", "enable_dryden_turbulence"),
+    ("RC_HUMAN_DRYDEN_RANDOMIZE", "dryden_randomize"),
+    ("RC_HUMAN_DRYDEN_DOMAIN_RANDOMIZATION", "dryden_domain_randomization"),
+    ("RC_HUMAN_DRYDEN_SIGMA_CURRICULUM_ENABLE", "dryden_sigma_curriculum_enable"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_CURRICULUM_ENABLE", "dryden_mean_wind_curriculum_enable"),
+    ("RC_HUMAN_ENABLE_DRYDEN_ANGULAR_TURBULENCE", "enable_dryden_angular_turbulence"),
+    ("RC_HUMAN_WIND_DRAG_ENABLE", "wind_drag_enable"),
+    ("RC_HUMAN_WIND_PQR_TORQUE_ENABLE", "wind_pqr_torque_enable"),
     ("RC_HUMAN_TRACKING_BAD_DONE_ENABLE", "rc_human_tracking_bad_done_enable"),
     ("RC_HUMAN_VXYVZ_DYNAMIC_BAD_DONE_ENABLE", "rc_human_vxyvz_dynamic_bad_done_enable"),
-    ("RC_HUMAN_SUCCESS_IGNORE_TRANSIENT", "rc_human_success_ignore_transient"),
     ("RC_HUMAN_CURRICULUM_ENABLE", "rc_human_curriculum_enable"),
     ("RC_HUMAN_VX_FORWARD_CURRICULUM_ENABLE", "rc_human_vx_forward_curriculum_enable"),
     ("RC_HUMAN_YAW_COMMAND_ENABLE", "rc_human_yaw_command_enable"),
@@ -189,12 +223,49 @@ for env_key, data_key in [
     ("RC_HUMAN_YAW_TRACKING_ENABLE", "rc_human_yaw_tracking_enable"),
     ("RC_HUMAN_YAW_REWARD_ENABLE", "rc_human_yaw_reward_enable"),
     ("RC_HUMAN_ALTITUDE_AWARE_VZ_ENABLE", "rc_human_altitude_aware_vz_enable"),
+    ("RC_HUMAN_SUCCESS_USE_YAW_ATTITUDE", "rc_human_success_use_yaw_attitude"),
     ("RC_HUMAN_ENABLE_SENSOR_NOISE", "enable_sensor_noise"),
 ]:
     raw = os.environ.get(env_key)
     if raw is not None:
-        data[data_key] = raw.strip().lower() in {"1", "true", "yes", "on"}
+        data[data_key] = env_bool(env_key)
 for env_key, data_key in [
+    ("RC_HUMAN_WIND_NORTH", "wind_north"),
+    ("RC_HUMAN_WIND_EAST", "wind_east"),
+    ("RC_HUMAN_WIND_DOWN", "wind_down"),
+    ("RC_HUMAN_GUST_NORTH", "gust_north"),
+    ("RC_HUMAN_GUST_EAST", "gust_east"),
+    ("RC_HUMAN_GUST_DOWN", "gust_down"),
+    ("RC_HUMAN_DRYDEN_SIGMA_REF", "dryden_sigma_ref"),
+    ("RC_HUMAN_DRYDEN_SIGMA_REF_MIN", "dryden_sigma_ref_min"),
+    ("RC_HUMAN_DRYDEN_SIGMA_REF_MAX", "dryden_sigma_ref_max"),
+    ("RC_HUMAN_DRYDEN_SIGMA_SCALE_MIN", "dryden_sigma_scale_min"),
+    ("RC_HUMAN_DRYDEN_SIGMA_SCALE_MAX", "dryden_sigma_scale_max"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_SCALE_MIN", "dryden_mean_wind_scale_min"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_SCALE_MAX", "dryden_mean_wind_scale_max"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_NORTH_MIN", "dryden_mean_wind_north_min"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_NORTH_MAX", "dryden_mean_wind_north_max"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_EAST_MIN", "dryden_mean_wind_east_min"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_EAST_MAX", "dryden_mean_wind_east_max"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_DOWN_MIN", "dryden_mean_wind_down_min"),
+    ("RC_HUMAN_DRYDEN_MEAN_WIND_DOWN_MAX", "dryden_mean_wind_down_max"),
+    ("RC_HUMAN_DRYDEN_PQR_SIGMA_REF", "dryden_pqr_sigma_ref"),
+    ("RC_HUMAN_DRYDEN_PQR_SIGMA_SCALE_MIN", "dryden_pqr_sigma_scale_min"),
+    ("RC_HUMAN_DRYDEN_PQR_SIGMA_SCALE_MAX", "dryden_pqr_sigma_scale_max"),
+    ("RC_HUMAN_DRYDEN_PQR_ATTACK_P_MAX", "dryden_pqr_attack_p_max"),
+    ("RC_HUMAN_DRYDEN_PQR_ATTACK_Q_MAX", "dryden_pqr_attack_q_max"),
+    ("RC_HUMAN_DRYDEN_PQR_ATTACK_R_MAX", "dryden_pqr_attack_r_max"),
+    ("RC_HUMAN_WIND_BODY_CDA_X", "wind_body_cda_x"),
+    ("RC_HUMAN_WIND_BODY_CDA_Y", "wind_body_cda_y"),
+    ("RC_HUMAN_WIND_BODY_CDA_Z", "wind_body_cda_z"),
+    ("RC_HUMAN_WIND_CP_X", "wind_cp_x"),
+    ("RC_HUMAN_WIND_CP_Y", "wind_cp_y"),
+    ("RC_HUMAN_WIND_CP_Z", "wind_cp_z"),
+    ("RC_HUMAN_WIND_PQR_ACCEL_GAIN_P", "wind_pqr_accel_gain_p"),
+    ("RC_HUMAN_WIND_PQR_ACCEL_GAIN_Q", "wind_pqr_accel_gain_q"),
+    ("RC_HUMAN_WIND_PQR_ACCEL_GAIN_R", "wind_pqr_accel_gain_r"),
+    ("RC_HUMAN_WIND_FORCE_CLIP", "wind_force_clip"),
+    ("RC_HUMAN_WIND_MOMENT_CLIP", "wind_moment_clip"),
     ("RC_HUMAN_ALT_GUARD_ZONE", "rc_human_alt_guard_zone"),
     ("RC_HUMAN_ALT_LOW", "rc_human_alt_low"),
     ("RC_HUMAN_ALT_HIGH", "rc_human_alt_high"),
@@ -219,6 +290,13 @@ for env_key, data_key in [
     ("RC_HUMAN_OVERSHOOT_DEADBAND", "rc_human_overshoot_deadband"),
     ("RC_HUMAN_W_ADAPTIVE_DAMPING", "rc_human_w_adaptive_damping"),
     ("RC_HUMAN_ADAPTIVE_DAMPING_GAIN", "rc_human_adaptive_damping_gain"),
+    ("RC_HUMAN_W_SPEED_MARGIN", "rc_human_w_speed_margin"),
+    ("RC_HUMAN_SPEED_MARGIN_START", "rc_human_speed_margin_start"),
+    ("RC_HUMAN_SPEED_MARGIN_SCALE", "rc_human_speed_margin_scale"),
+    ("RC_HUMAN_W_ATTITUDE_MARGIN", "rc_human_w_attitude_margin"),
+    ("RC_HUMAN_ROLL_MARGIN_START_DEG", "rc_human_roll_margin_start_deg"),
+    ("RC_HUMAN_PITCH_MARGIN_START_DEG", "rc_human_pitch_margin_start_deg"),
+    ("RC_HUMAN_ATTITUDE_MARGIN_SCALE_DEG", "rc_human_attitude_margin_scale_deg"),
     ("RC_HUMAN_SIG_YAW", "rc_human_sig_yaw"),
     ("RC_HUMAN_SIG_YAW_DELTA", "rc_human_sig_yaw_delta"),
     ("RC_HUMAN_SIG_YAW_RATE", "rc_human_sig_yaw_rate"),
@@ -229,6 +307,12 @@ for env_key, data_key in [
     ("RC_HUMAN_SIG_OMEGA", "rc_human_sig_omega"),
     ("RC_HUMAN_SIG_SMOOTH", "rc_human_sig_smooth"),
     ("RC_HUMAN_SUCCESS_VEL_ERROR", "rc_human_success_vel_error"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE0", "rc_human_success_vel_error_mode0"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE1", "rc_human_success_vel_error_mode1"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE2", "rc_human_success_vel_error_mode2"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE3", "rc_human_success_vel_error_mode3"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE4", "rc_human_success_vel_error_mode4"),
+    ("RC_HUMAN_SUCCESS_VEL_ERROR_MODE5", "rc_human_success_vel_error_mode5"),
     ("RC_HUMAN_SUCCESS_YAW_ERROR", "rc_human_success_yaw_error"),
     ("RC_HUMAN_SUCCESS_ATTITUDE_ERROR", "rc_human_success_attitude_error"),
     ("RC_HUMAN_MODE5_RELEASE_SPEED_ERROR", "rc_human_mode5_release_speed_error"),
@@ -271,6 +355,7 @@ for env_key, data_key in [
 
 header = (
     "# Generated by scripts/train_rc_human_rl_nowind_from_scratch.sh.\n"
+    f"# random_wind_enable: {str(random_wind).lower()}\n"
     "# Do not edit this file directly; edit envs/configs/rc_human.yaml or the script.\n"
 )
 out_path.write_text(
@@ -329,12 +414,21 @@ TRAIN_CMD=(
     "$@"
 )
 
-echo "rc_human no-wind from-scratch training"
+WIND_MODE_LABEL="no-wind"
+WIND_STATUS="disabled; Dryden: disabled; wind loading: disabled"
+case "${RC_HUMAN_RANDOM_WIND_ENABLE:-0}" in
+    1|true|TRUE|yes|YES|on|ON)
+        WIND_MODE_LABEL="random-wind"
+        WIND_STATUS="random Dryden enabled; angular turbulence enabled; wind loading enabled"
+        ;;
+esac
+
+echo "rc_human ${WIND_MODE_LABEL} from-scratch training"
 echo "  experiment: ${EXP}"
 echo "  env/model: ${ENV_NAME}/${SCENARIO_NAME}/${MODEL_NAME}"
 echo "  base_config: ${BASE_CONFIG_PATH}"
-echo "  no_wind_config: ${NO_WIND_CONFIG_PATH}"
-echo "  wind: disabled; Dryden: disabled; wind loading: disabled"
+echo "  runtime_config: ${NO_WIND_CONFIG_PATH}"
+echo "  wind: ${WIND_STATUS}"
 echo "  seed/device: ${SEED}/${DEVICE}"
 echo "  mode_order: ${RC_HUMAN_MODE_ORDER}"
 echo "  max_mode_slots: ${RC_HUMAN_MAX_MODE_SLOTS}"
@@ -345,6 +439,7 @@ echo "  ppo_epoch=${PPO_EPOCH}, num_mini_batch=${NUM_MINI_BATCH}, entropy_coef=$
 echo "  yaw_reward_mode=${RC_HUMAN_YAW_REWARD_MODE:-target}, yaw_cmd=${RC_HUMAN_YAW_COMMAND_ENABLE:-1}, yaw_hold=${RC_HUMAN_YAW_HOLD_ENABLE:-1}, yaw_track=${RC_HUMAN_YAW_TRACKING_ENABLE:-1}"
 echo "  yaw_w=${RC_HUMAN_W_YAW:-}, yaw_rate_w=${RC_HUMAN_W_YAW_RATE:-0}, yaw_sig=${RC_HUMAN_SIG_YAW:-}, yaw_rate_sig=${RC_HUMAN_SIG_YAW_RATE:-}"
 echo "  success(v=${RC_HUMAN_SUCCESS_VEL_ERROR:-}, yaw=${RC_HUMAN_SUCCESS_YAW_ERROR:-}, att=${RC_HUMAN_SUCCESS_ATTITUDE_ERROR:-}), bad_done(track=${RC_HUMAN_TRACKING_BAD_DONE_ENABLE:-}, dyn=${RC_HUMAN_VXYVZ_DYNAMIC_BAD_DONE_ENABLE:-}, margin=${RC_HUMAN_VXYVZ_DYNAMIC_BAD_DONE_MARGIN:-})"
+echo "  success_by_mode(v0=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE0:-}, v1=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE1:-}, v2=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE2:-}, v3=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE3:-}, v4=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE4:-}, v5=${RC_HUMAN_SUCCESS_VEL_ERROR_MODE5:-}, yaw_att=${RC_HUMAN_SUCCESS_USE_YAW_ATTITUDE:-1})"
 echo "  curriculum(enable=${RC_HUMAN_CURRICULUM_ENABLE:-}, mode_order=${RC_HUMAN_MODE_ORDER}, levels=${RC_HUMAN_LEVELS_PER_MODE:-20}, mix=${RC_HUMAN_MIX_CURRENT:-}/${RC_HUMAN_MIX_EASY_REPLAY:-}/${RC_HUMAN_MIX_MEDIUM_REPLAY:-}/${RC_HUMAN_MIX_RANDOM_REPLAY:-})"
 
 case "${DRY_RUN:-0}" in

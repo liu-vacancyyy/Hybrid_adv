@@ -71,7 +71,7 @@ num_observation: 30
 # aircraft / safety config
 altitude_limit: 0.2
 acceleration_limit: 12.0         # wind-aware RC task: avoid killing normal early transients
-max_velocity: 10             # LearningToFly high-speed guard
+max_velocity: 5              # LearningToFly high-speed guard
 min_alpha: -10
 max_alpha: 20
 min_beta: -15
@@ -129,13 +129,8 @@ rc_human_mix_random_replay: 0.15
 rc_human_easy_stick: 0.25
 rc_human_medium_stick: 0.65
 rc_human_hard_stick: 1.0
-rc_human_command_transient_grace_steps: 60   # ignore velocity tracking bad_done for 1.2 s after ordinary command jumps
-rc_human_command_transient_threshold: 0.20    # raw-stick delta that starts the transient grace window
 rc_human_mode3_reverse_axes: 1               # reversal flips one dominant/random axis; mode 4 covers multi-axis commands
 rc_human_command_rate_limit_frac: 0.05       # max raw-stick change per 20 ms step; 0.05 means 0->1 in 0.4 s, -1->1 in 0.8 s
-rc_human_command_reversal_threshold: 0.10    # sign-flip threshold on raw stick channels
-rc_human_large_command_transient_delta: 1.0 # large command jump threshold across any mode
-rc_human_large_command_transient_grace_steps: 100 # ignore velocity tracking bad_done for 2.0 s after large jumps
 rc_human_mode5_hold_min_steps: 75             # hold forward command for at least 1.5 s before release
 rc_human_mode5_hold_max_steps: 250            # force release after 5.0 s even if target speed is not reached
 rc_human_mode5_release_recovery_steps: 150    # keep centered sticks for 3.0 s after release before resampling
@@ -144,7 +139,6 @@ rc_human_mode5_release_target_frac: 0.80      # require command to reach 80% of 
 rc_human_success_vel_error: 0.75
 rc_human_success_yaw_error: 0.30
 rc_human_success_attitude_error: 0.35
-rc_human_success_ignore_transient: true       # curriculum success metrics skip command-transition steps
 rc_human_tracking_bad_done_enable: true
 rc_human_vxyvz_dynamic_bad_done_enable: false # terminate if |vx/vy/vz error| exceeds |target - initial| + margin
 rc_human_vxyvz_dynamic_bad_done_margin: 0.5   # m/s extra tolerance beyond initial-to-target velocity gap
@@ -155,7 +149,6 @@ rc_human_bad_done_vx_error_min: 0.75
 rc_human_bad_done_vx_error_frac: 0.25
 rc_human_bad_done_vy_error: 0.5
 rc_human_bad_done_vz_error: 0.5
-rc_human_bad_done_grace_steps: 50       # ignore first 1.0 s after reset
 rc_human_bad_done_persist_steps: 10     # require 0.2 s continuous violation
 rc_human_alt_high: 95.0
 rc_human_alt_low: 5.0
@@ -178,6 +171,13 @@ rc_human_w_overshoot: 0.0
 rc_human_overshoot_deadband: 0.05
 rc_human_w_adaptive_damping: 0.0
 rc_human_adaptive_damping_gain: 4.0
+rc_human_w_speed_margin: 2.0
+rc_human_speed_margin_start: 1.7320508075688772
+rc_human_speed_margin_scale: 1.0
+rc_human_w_attitude_margin: 2.0
+rc_human_roll_margin_start_deg: 20.0
+rc_human_pitch_margin_start_deg: 15.0
+rc_human_attitude_margin_scale_deg: 5.0
 rc_human_yaw_reward_mode: target # target: heading-target_heading; delta: heading-heading_prev
 rc_human_sig_vel: 0.45
 rc_human_sig_vx: 0.90

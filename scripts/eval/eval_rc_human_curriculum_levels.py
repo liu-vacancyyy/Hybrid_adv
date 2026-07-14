@@ -50,10 +50,16 @@ def parse_args():
     p.add_argument("--min-level", type=int, default=0)
     p.add_argument("--max-level", type=int, default=119)
     p.add_argument("--max-steps", type=int, default=1500)
+    p.add_argument("--scenario-name", type=str, default="rc_human",
+                   help="Config YAML name under envs/configs, without .yaml.")
     p.add_argument("--model-name", type=str, default="HYBRID_NEW")
     p.add_argument("--mode-order", type=str, default=None,
                    help="Optional RC_HUMAN_MODE_ORDER override, e.g. '0 1 2 5 3 4'.")
     p.add_argument("--deterministic", action="store_true", default=True)
+    p.add_argument("--vectorized-level-eval", action="store_true",
+                   help="Run episodes for the same level in one vectorized env.")
+    p.add_argument("--levels-per-vectorized-batch", type=int, default=1,
+                   help="When vectorized eval is enabled, run this many levels per env batch.")
     p.add_argument("--save-per-level-plots", action="store_true",
                    help="Save one detailed tracking/command/observation/wind figure per level.")
 
@@ -86,10 +92,14 @@ def seed_everything(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def to_float(x):
+def to_float(x, idx=None):
     if isinstance(x, torch.Tensor):
-        return float(x.detach().cpu().reshape(-1)[0].item())
-    return float(np.asarray(x).reshape(-1)[0])
+        flat = x.detach().cpu().reshape(-1)
+        pos = 0 if idx is None else int(idx)
+        return float(flat[pos].item())
+    flat = np.asarray(x).reshape(-1)
+    pos = 0 if idx is None else int(idx)
+    return float(flat[pos])
 
 
 def load_actor(env, args, device):
@@ -113,13 +123,26 @@ def set_fixed_level(task, level):
         task.dwell_left[:] = 0
 
 
+def set_fixed_levels(task, levels):
+    task.curriculum_enable = True
+    level_tensor = torch.as_tensor(levels, dtype=torch.long, device=task.device)
+    task.curriculum_level[:] = level_tensor
+    task.max_curriculum_level = max(task.max_curriculum_level, int(level_tensor.max().item()))
+    task.mix_current = 1.0
+    task.mix_easy = 0.0
+    task.mix_medium = 0.0
+    task.mix_random = 0.0
+    if hasattr(task, "dwell_left"):
+        task.dwell_left[:] = 0
+
+
 def mode_for_level(task, level):
     mode_slot = min(int(level) // int(task.levels_per_mode),
                     int(task.active_mode_slots) - 1)
     return int(task.mode_order[mode_slot].item())
 
 
-def record_step(env, obs, reward, action, prev_action):
+def record_step(env, obs, reward, action, prev_action, env_idx=0):
     roll, pitch, heading = env.model.get_posture()
     vx_n, vy_e = env.model.get_ground_speed()
     vz = env.model.get_climb_rate()
@@ -136,7 +159,9 @@ def record_step(env, obs, reward, action, prev_action):
     att_err = torch.sqrt(roll * roll + pitch * pitch)
     action_delta = 0.0
     if prev_action is not None:
-        action_delta = float(torch.mean(torch.abs(action - prev_action)).item())
+        action_delta = float(
+            torch.mean(torch.abs(action[env_idx] - prev_action[env_idx])).item()
+        )
 
     if hasattr(env.model, "get_wind_ned"):
         wind_n, wind_e, wind_d = env.model.get_wind_ned()
@@ -144,39 +169,39 @@ def record_step(env, obs, reward, action, prev_action):
         wind_n = wind_e = wind_d = torch.zeros_like(vz)
 
     row = {
-        "reward": to_float(reward),
-        "local_vx": to_float(local_vx),
-        "target_vx": to_float(env.task.target_vx),
-        "local_vy": to_float(local_vy),
-        "target_vy": to_float(env.task.target_vy),
-        "vz": to_float(vz),
-        "target_vz": to_float(env.task.target_vz),
-        "heading": to_float(heading),
-        "target_heading": to_float(env.task.target_heading),
-        "target_yaw_rate": to_float(env.task.target_yaw_rate),
-        "yaw_err": to_float(yaw_err),
-        "vel_err": to_float(vel_err),
-        "att_err": to_float(att_err),
-        "roll": to_float(roll),
-        "pitch": to_float(pitch),
-        "alpha": to_float(alpha),
-        "beta": to_float(beta),
-        "alpha_deg": float(np.degrees(to_float(alpha))),
-        "beta_deg": float(np.degrees(to_float(beta))),
-        "wind_north": to_float(wind_n),
-        "wind_east": to_float(wind_e),
-        "wind_down": to_float(wind_d),
-        "raw_vx": to_float(env.task.raw_vx),
-        "raw_vy": to_float(env.task.raw_vy),
-        "raw_vz": to_float(env.task.raw_vz),
-        "raw_yaw": to_float(env.task.raw_yaw),
-        "stick_vx": to_float(env.task.stick_vx),
-        "stick_vy": to_float(env.task.stick_vy),
-        "stick_vz": to_float(env.task.stick_vz),
-        "stick_yaw": to_float(env.task.stick_yaw),
+        "reward": to_float(reward, env_idx),
+        "local_vx": to_float(local_vx, env_idx),
+        "target_vx": to_float(env.task.target_vx, env_idx),
+        "local_vy": to_float(local_vy, env_idx),
+        "target_vy": to_float(env.task.target_vy, env_idx),
+        "vz": to_float(vz, env_idx),
+        "target_vz": to_float(env.task.target_vz, env_idx),
+        "heading": to_float(heading, env_idx),
+        "target_heading": to_float(env.task.target_heading, env_idx),
+        "target_yaw_rate": to_float(env.task.target_yaw_rate, env_idx),
+        "yaw_err": to_float(yaw_err, env_idx),
+        "vel_err": to_float(vel_err, env_idx),
+        "att_err": to_float(att_err, env_idx),
+        "roll": to_float(roll, env_idx),
+        "pitch": to_float(pitch, env_idx),
+        "alpha": to_float(alpha, env_idx),
+        "beta": to_float(beta, env_idx),
+        "alpha_deg": float(np.degrees(to_float(alpha, env_idx))),
+        "beta_deg": float(np.degrees(to_float(beta, env_idx))),
+        "wind_north": to_float(wind_n, env_idx),
+        "wind_east": to_float(wind_e, env_idx),
+        "wind_down": to_float(wind_d, env_idx),
+        "raw_vx": to_float(env.task.raw_vx, env_idx),
+        "raw_vy": to_float(env.task.raw_vy, env_idx),
+        "raw_vz": to_float(env.task.raw_vz, env_idx),
+        "raw_yaw": to_float(env.task.raw_yaw, env_idx),
+        "stick_vx": to_float(env.task.stick_vx, env_idx),
+        "stick_vy": to_float(env.task.stick_vy, env_idx),
+        "stick_vz": to_float(env.task.stick_vz, env_idx),
+        "stick_yaw": to_float(env.task.stick_yaw, env_idx),
         "action_delta": action_delta,
     }
-    obs_np = obs.detach().cpu().reshape(-1).numpy()
+    obs_np = obs[env_idx].detach().cpu().reshape(-1).numpy()
     for i, value in enumerate(obs_np):
         row[f"obs_{i:02d}"] = float(value)
     return row
@@ -185,7 +210,7 @@ def record_step(env, obs, reward, action, prev_action):
 def run_episode(level, episode_idx, args, device):
     seed = args.seed + int(level) * 1009 + episode_idx
     seed_everything(seed)
-    env = ControlEnv(num_envs=1, config="rc_human", model=args.model_name,
+    env = ControlEnv(num_envs=1, config=args.scenario_name, model=args.model_name,
                      random_seed=seed, device=device)
     set_fixed_level(env.task, level)
     actor = load_actor(env, args, device)
@@ -205,7 +230,7 @@ def run_episode(level, episode_idx, args, device):
         with torch.no_grad():
             action, _, rnn = actor(obs, rnn, masks, deterministic=args.deterministic)
         obs, reward, done, bad_done, exceed, _info = env.step(action)
-        row = record_step(env, obs, reward, action, prev_action)
+        row = record_step(env, obs, reward, action, prev_action, env_idx=0)
         row.update({
             "level": int(level),
             "mode_id": mode_id,
@@ -231,6 +256,138 @@ def run_episode(level, episode_idx, args, device):
 
     env.close()
     return trace, term_type
+
+
+def run_level_vectorized(level, args, device, actor):
+    seed = args.seed + int(level) * 1009
+    seed_everything(seed)
+    env = ControlEnv(num_envs=args.episodes_per_level, config=args.scenario_name,
+                     model=args.model_name, random_seed=seed, device=device)
+    set_fixed_level(env.task, level)
+
+    obs = env.reset()
+    set_fixed_level(env.task, level)
+    env.task.sync_command(env)
+    mode_id = mode_for_level(env.task, level)
+    rnn = torch.zeros((env.n, args.recurrent_hidden_layers,
+                       args.recurrent_hidden_size), device=device)
+    masks = torch.ones((env.n, 1), device=device)
+    traces = [[] for _ in range(env.n)]
+    term_types = ["truncated" for _ in range(env.n)]
+    finished = torch.zeros(env.n, dtype=torch.bool, device=device)
+    prev_action = None
+
+    for step in range(args.max_steps):
+        with torch.no_grad():
+            action, _, rnn = actor(obs, rnn, masks, deterministic=args.deterministic)
+        obs, reward, done, bad_done, exceed, _info = env.step(action)
+
+        active_indices = torch.where(~finished)[0].detach().cpu().tolist()
+        for env_idx in active_indices:
+            row = record_step(env, obs, reward, action, prev_action, env_idx=env_idx)
+            row.update({
+                "level": int(level),
+                "mode_id": mode_id,
+                "episode": int(env_idx),
+                "step": int(len(traces[env_idx])),
+                "time_s": float(len(traces[env_idx]) * env.model.dt),
+                "vx_forward_limit": to_float(getattr(
+                    env.task, "vx_forward_limit", torch.zeros(env.n, device=device)
+                ), env_idx),
+            })
+            traces[env_idx].append(row)
+
+        newly_finished = (~finished) & (done.bool() | bad_done.bool() | exceed.bool())
+        for env_idx in torch.where(newly_finished)[0].detach().cpu().tolist():
+            if bool(done[env_idx].item()):
+                term_types[env_idx] = "done"
+            elif bool(bad_done[env_idx].item()):
+                term_types[env_idx] = "bad_done"
+            elif bool(exceed[env_idx].item()):
+                term_types[env_idx] = "timeout"
+
+        finished |= newly_finished
+        if bool(torch.all(finished).item()):
+            break
+
+        prev_action = action.detach().clone()
+        masks = (~finished).float().unsqueeze(-1)
+
+    env.close()
+    return traces, term_types
+
+
+def run_levels_vectorized(levels, args, device, actor):
+    levels = [int(x) for x in levels]
+    env_levels = []
+    env_episodes = []
+    for level in levels:
+        for ep in range(args.episodes_per_level):
+            env_levels.append(level)
+            env_episodes.append(ep)
+
+    seed = args.seed + int(min(levels)) * 1009
+    seed_everything(seed)
+    env = ControlEnv(num_envs=len(env_levels), config=args.scenario_name,
+                     model=args.model_name, random_seed=seed, device=device)
+    set_fixed_levels(env.task, env_levels)
+
+    obs = env.reset()
+    set_fixed_levels(env.task, env_levels)
+    env.task.sync_command(env)
+    mode_ids = [mode_for_level(env.task, level) for level in env_levels]
+    rnn = torch.zeros((env.n, args.recurrent_hidden_layers,
+                       args.recurrent_hidden_size), device=device)
+    masks = torch.ones((env.n, 1), device=device)
+    traces = [[] for _ in range(env.n)]
+    term_types = ["truncated" for _ in range(env.n)]
+    finished = torch.zeros(env.n, dtype=torch.bool, device=device)
+    prev_action = None
+
+    for step in range(args.max_steps):
+        with torch.no_grad():
+            action, _, rnn = actor(obs, rnn, masks, deterministic=args.deterministic)
+        obs, reward, done, bad_done, exceed, _info = env.step(action)
+
+        active_indices = torch.where(~finished)[0].detach().cpu().tolist()
+        for env_idx in active_indices:
+            row = record_step(env, obs, reward, action, prev_action, env_idx=env_idx)
+            row.update({
+                "level": int(env_levels[env_idx]),
+                "mode_id": int(mode_ids[env_idx]),
+                "episode": int(env_episodes[env_idx]),
+                "step": int(len(traces[env_idx])),
+                "time_s": float(len(traces[env_idx]) * env.model.dt),
+                "vx_forward_limit": to_float(getattr(
+                    env.task, "vx_forward_limit", torch.zeros(env.n, device=device)
+                ), env_idx),
+            })
+            traces[env_idx].append(row)
+
+        newly_finished = (~finished) & (done.bool() | bad_done.bool() | exceed.bool())
+        for env_idx in torch.where(newly_finished)[0].detach().cpu().tolist():
+            if bool(done[env_idx].item()):
+                term_types[env_idx] = "done"
+            elif bool(bad_done[env_idx].item()):
+                term_types[env_idx] = "bad_done"
+            elif bool(exceed[env_idx].item()):
+                term_types[env_idx] = "timeout"
+
+        finished |= newly_finished
+        if bool(torch.all(finished).item()):
+            break
+
+        prev_action = action.detach().clone()
+        masks = (~finished).float().unsqueeze(-1)
+
+    env.close()
+
+    by_level = {level: [] for level in levels}
+    for trace, term_type in zip(traces, term_types):
+        if not trace:
+            continue
+        by_level[trace[0]["level"]].append((trace, term_type))
+    return by_level
 
 
 def summarize_trace(trace, term_type):
@@ -265,6 +422,18 @@ def save_csv(rows, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_csv_rows(rows, path, append=False):
+    if not rows:
+        return
+    mode = "a" if append else "w"
+    write_header = (not append) or (not path.exists()) or path.stat().st_size == 0
+    with open(path, mode, newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        if write_header:
+            writer.writeheader()
         writer.writerows(rows)
 
 
@@ -398,6 +567,7 @@ def plot_one_level(trace, out_png):
     t = np.asarray([x["time_s"] for x in trace])
     level = trace[0]["level"]
     mode = trace[0]["mode_id"]
+    episode = trace[0]["episode"]
     fig, axes = plt.subplots(4, 2, figsize=(16, 13), sharex=True)
     axes = axes.reshape(-1)
 
@@ -472,7 +642,7 @@ def plot_one_level(trace, out_png):
 
     for ax in axes[-2:]:
         ax.set_xlabel("time (s)")
-    fig.suptitle(f"RC human level {level} mode {mode}")
+    fig.suptitle(f"RC human level {level} mode {mode} episode {episode}")
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
@@ -482,7 +652,8 @@ def plot_all_levels(traces, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
     for trace in traces:
         level = trace[0]["level"]
-        plot_one_level(trace, out_dir / f"level_{level:03d}.png")
+        episode = trace[0]["episode"]
+        plot_one_level(trace, out_dir / f"level_{level:03d}_episode_{episode:02d}.png")
 
 
 def main():
@@ -493,32 +664,100 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    all_traces = []
+    representative_traces = []
     summary_rows = []
-    for level in range(args.min_level, args.max_level + 1):
-        print(f"[eval] level={level}")
-        for ep in range(args.episodes_per_level):
-            trace, term_type = run_episode(level, ep, args, device)
-            all_traces.append(trace)
-            row = summarize_trace(trace, term_type)
-            summary_rows.append(row)
-            print(
-                f"  ep={ep} mode={row['mode_id']} len={row['length']:4d} "
-                f"ret={row['return']:8.1f} vel={row['vel_mae']:.4f} "
-                f"yaw={row['yaw_mae_deg']:.3f}deg att={row['att_mae_deg']:.3f}deg "
-                f"term={term_type}"
-            )
+    per_level_dir = out_dir / "per_level_plots"
+    trace_csv = out_dir / "rc_human_curriculum_level_traces.csv"
+    trace_csv_written = False
 
-    trace_rows = [x for tr in all_traces for x in tr]
+    if args.vectorized_level_eval:
+        seed_everything(args.seed)
+        actor_env = ControlEnv(num_envs=args.episodes_per_level,
+                               config=args.scenario_name,
+                               model=args.model_name,
+                               random_seed=args.seed,
+                               device=device)
+        actor = load_actor(actor_env, args, device)
+        actor_env.close()
+
+    levels = list(range(args.min_level, args.max_level + 1))
+    representative_levels = sorted(set([
+        levels[0],
+        levels[len(levels) // 4],
+        levels[len(levels) // 2],
+        levels[(3 * len(levels)) // 4],
+        levels[-1],
+    ]))
+    if args.vectorized_level_eval:
+        batch_size = max(1, int(args.levels_per_vectorized_batch))
+        level_batches = [
+            levels[i:i + batch_size] for i in range(0, len(levels), batch_size)
+        ]
+    else:
+        level_batches = [[level] for level in levels]
+
+    for level_batch in level_batches:
+        if args.vectorized_level_eval:
+            print(f"[eval] levels={level_batch[0]}..{level_batch[-1]}")
+            batch_traces = run_levels_vectorized(level_batch, args, device, actor)
+            for level in level_batch:
+                print(f"[eval] level={level}")
+                for trace, term_type in batch_traces.get(level, []):
+                    row = summarize_trace(trace, term_type)
+                    summary_rows.append(row)
+                    ep = int(row["episode"])
+                    if int(level) in representative_levels and ep == 0:
+                        representative_traces.append(trace)
+                    print(
+                        f"  ep={ep} mode={row['mode_id']} len={row['length']:4d} "
+                        f"ret={row['return']:8.1f} vel={row['vel_mae']:.4f} "
+                        f"yaw={row['yaw_mae_deg']:.3f}deg att={row['att_mae_deg']:.3f}deg "
+                        f"term={term_type}"
+                    )
+                    if args.save_per_level_plots:
+                        per_level_dir.mkdir(parents=True, exist_ok=True)
+                        plot_one_level(
+                            trace,
+                            per_level_dir / f"level_{level:03d}_episode_{ep:02d}.png",
+                        )
+                    write_csv_rows([x for x in trace], trace_csv, append=trace_csv_written)
+                    trace_csv_written = True
+        else:
+            level = level_batch[0]
+            print(f"[eval] level={level}")
+            for ep in range(args.episodes_per_level):
+                trace, term_type = run_episode(level, ep, args, device)
+                row = summarize_trace(trace, term_type)
+                summary_rows.append(row)
+                if int(level) in representative_levels and int(ep) == 0:
+                    representative_traces.append(trace)
+                print(
+                    f"  ep={ep} mode={row['mode_id']} len={row['length']:4d} "
+                    f"ret={row['return']:8.1f} vel={row['vel_mae']:.4f} "
+                    f"yaw={row['yaw_mae_deg']:.3f}deg att={row['att_mae_deg']:.3f}deg "
+                    f"term={term_type}"
+                )
+                if args.save_per_level_plots:
+                    per_level_dir.mkdir(parents=True, exist_ok=True)
+                    plot_one_level(
+                        trace,
+                        per_level_dir / f"level_{level:03d}_episode_{ep:02d}.png",
+                    )
+                write_csv_rows([x for x in trace], trace_csv, append=trace_csv_written)
+                trace_csv_written = True
+
+        if summary_rows:
+            save_csv(summary_rows, out_dir / "rc_human_curriculum_level_summary_raw.csv")
+            save_csv(level_means(summary_rows), out_dir / "rc_human_curriculum_level_summary.csv")
+
     level_rows = level_means(summary_rows)
     save_csv(summary_rows, out_dir / "rc_human_curriculum_level_summary_raw.csv")
     save_csv(level_rows, out_dir / "rc_human_curriculum_level_summary.csv")
-    save_csv(trace_rows, out_dir / "rc_human_curriculum_level_traces.csv")
     plot_level_summary(level_rows, out_dir / "rc_human_curriculum_level_tracking.png")
     plot_representative_traces(
-        all_traces, level_rows, out_dir / "rc_human_curriculum_representative_traces.png"
+        representative_traces, level_rows, out_dir / "rc_human_curriculum_representative_traces.png"
     )
-    if args.save_per_level_plots:
+    if args.save_per_level_plots and (not args.vectorized_level_eval):
         plot_all_levels(all_traces, out_dir / "per_level_plots")
     print(f"[saved] {out_dir}")
 

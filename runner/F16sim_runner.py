@@ -224,13 +224,9 @@ class F16SimRunner(Runner):
         )
         yaw_err = self._as_float(infos, "rc_human/tracking_yaw_error_mean")
         att_err = self._as_float(infos, "rc_human/tracking_attitude_error_mean")
-        valid_frac = self._as_float(infos, "rc_human/success_metric_valid_fraction")
-        skipped_frac = self._as_float(infos, "rc_human/success_metric_skipped_fraction")
-
         level_mean = self._as_float(infos, "rc_human/curriculum_level_mean")
         level_max = self._as_float(infos, "rc_human/curriculum_level_max")
         level_limit = self._as_float(infos, "rc_human/curriculum_level_limit")
-        transient = self._as_float(infos, "rc_human/command_transient_fraction")
         rate_limited = self._as_float(infos, "rc_human/command_rate_limited_fraction")
         raw_delta = self._as_float(infos, "rc_human/command_raw_delta_mean")
 
@@ -256,6 +252,8 @@ class F16SimRunner(Runner):
             ("reward/smooth_mean", "smooth"),
             ("reward/overshoot_mean", "over"),
             ("reward/adaptive_damping_mean", "damp"),
+            ("reward/speed_margin_mean", "speedM"),
+            ("reward/attitude_margin_mean", "attM"),
         ]:
             value = self._as_float(infos, key)
             if value is not None:
@@ -270,14 +268,13 @@ class F16SimRunner(Runner):
             f"        reward avg_ep={self._fmt(avg_reward, 2)} total_step={self._fmt(total_reward, 3)} "
             f"best_avg_ep={self._fmt(self._best_average_reward, 2)}\n"
             f"        tracking vel={self._fmt(vel_err, 4)}m/s yaw={self._fmt_deg(yaw_err)}deg "
-            f"att={self._fmt_deg(att_err)}deg valid={self._fmt(valid_frac, 2)} "
-            f"skipped={self._fmt(skipped_frac, 2)}\n"
+            f"att={self._fmt_deg(att_err)}deg\n"
             f"        done clean={int(clean_done)} bad={int(bad_done)} "
             f"bad_frac={self._fmt(bad_done_fraction, 3)} "
             f"best_clean_vel={self._fmt(self._best_tracking_error, 4)}\n"
             f"        curriculum level={self._fmt(level_mean, 1)}/{self._fmt(level_limit, 0)} "
             f"max={self._fmt(level_max, 0)} modes=[{self._nonzero_mode_summary(infos)}]\n"
-            f"        command transient={self._fmt(transient, 2)} rate_limited={self._fmt(rate_limited, 2)} "
+            f"        command rate_limited={self._fmt(rate_limited, 2)} "
             f"raw_delta={self._fmt(raw_delta, 3)}\n"
             f"        ppo policy={self._fmt(policy_loss, 4)} value={self._fmt(value_loss, 4)} "
             f"entropy={self._fmt(entropy_loss, 4)} ratio={self._fmt(ratio, 3)} "
@@ -308,9 +305,6 @@ class F16SimRunner(Runner):
             "rc_human/curriculum_level_limit",
             "rc_human/tracking_vel_error_mean", "rc_human/tracking_error_mean",
             "rc_human/tracking_yaw_error_mean", "rc_human/tracking_attitude_error_mean",
-            "rc_human/success_metric_valid_fraction",
-            "rc_human/success_metric_skipped_fraction",
-            "rc_human/command_transient_fraction",
             "rc_human/command_rate_limited_fraction",
             "rc_human/command_raw_delta_mean",
             "reward/vel_gaussian_mean", "reward/rel_tracking_mean",
@@ -318,7 +312,8 @@ class F16SimRunner(Runner):
             "reward/yaw_precision_mean", "reward/yaw_rate_mean",
             "reward/attitude_mean", "reward/omega_mean",
             "reward/smooth_mean", "reward/overshoot_mean",
-            "reward/adaptive_damping_mean",
+            "reward/adaptive_damping_mean", "reward/speed_margin_mean",
+            "reward/attitude_margin_mean",
             "policy_loss", "value_loss", "policy_entropy_loss",
             "ratio", "approx_kl", "actor_grad_norm",
             "critic_grad_norm", "skipped_updates",

@@ -1,7 +1,7 @@
-"""LearningToFly-style PID baseline for the RC OU tracking task.
+"""LearningToFly-style PID baseline for RC velocity tracking tasks.
 
-The controller reads ``RCTask`` targets directly:
-    target_vx, target_vz, target_heading
+The controller reads task targets directly:
+    target_vx, optional target_vy, target_vz, target_heading
 
 and outputs HybridModel-normalized actions:
     [head, rf, lb, lf, rb] in [-1, 1]
@@ -14,7 +14,7 @@ from algorithms.pid.hover_pid import PID, wrap_pi
 
 
 class RCPIDController:
-    """Cascade PID for vx / vz / heading tracking.
+    """Cascade PID for vx / vy / vz / heading tracking.
 
     This follows the LearningToFly PID stack:
 
@@ -55,7 +55,11 @@ class RCPIDController:
 
     def __init__(self, n, device, dt=0.02, mass=1.779, gravity=9.807,
                  max_thrust_per_motor=7.0, use_head_motor=True,
-                 head_max_scaled=0.45):
+                 head_max_scaled=0.45, xy_gains=None, z_gains=None,
+                 max_tilt_deg=None, max_horiz_accel=None,
+                 max_z_throttle_corr=None, yaw_p=None, max_yaw_rate=None,
+                 side_damp_p=None, alt_floor=None, alt_floor_buffer=0.8,
+                 alt_floor_vz_bias=0.8):
         self.n = int(n)
         self.device = torch.device(device) if not isinstance(device, torch.device) else device
         self.dt = float(dt)
@@ -65,11 +69,40 @@ class RCPIDController:
         self.throttle_hover = self.mass * self.gravity / (4.0 * self.max_thrust)
         self.use_head_motor = bool(use_head_motor)
         self.head_max_scaled = float(head_max_scaled)
+        self.max_tilt = (
+            math.radians(float(max_tilt_deg))
+            if max_tilt_deg is not None else self.MAX_TILT
+        )
+        self.max_horiz_accel = (
+            float(max_horiz_accel)
+            if max_horiz_accel is not None else self.MAX_HORIZ_ACCEL
+        )
+        self.max_z_throttle_corr = (
+            float(max_z_throttle_corr)
+            if max_z_throttle_corr is not None else self.MAX_Z_THROTTLE_CORR
+        )
+        self.yaw_p = float(yaw_p) if yaw_p is not None else self.YAW_P
+        self.max_yaw_rate = (
+            float(max_yaw_rate) if max_yaw_rate is not None else self.MAX_YAW_RATE
+        )
+        self.side_damp_p = (
+            float(side_damp_p) if side_damp_p is not None else self.SIDE_DAMP_P
+        )
+        self.alt_floor = None if alt_floor is None else float(alt_floor)
+        self.alt_floor_buffer = max(0.0, float(alt_floor_buffer))
+        self.alt_floor_vz_bias = max(0.0, float(alt_floor_vz_bias))
+        self.alt_floor_margin = torch.zeros(self.n, device=self.device)
 
         d = self.device
-        self.vx_pid = PID(dt=dt, n=n, device=d, **self.VEL_XY)
-        self.vy_pid = PID(dt=dt, n=n, device=d, **self.VEL_XY)
-        self.vz_pid = PID(dt=dt, n=n, device=d, **self.VEL_Z)
+        vel_xy = dict(self.VEL_XY)
+        if xy_gains:
+            vel_xy.update(xy_gains)
+        vel_z = dict(self.VEL_Z)
+        if z_gains:
+            vel_z.update(z_gains)
+        self.vx_pid = PID(dt=dt, n=n, device=d, **vel_xy)
+        self.vy_pid = PID(dt=dt, n=n, device=d, **vel_xy)
+        self.vz_pid = PID(dt=dt, n=n, device=d, **vel_z)
         self.roll_pid = PID(dt=dt, n=n, device=d, **self.ATTITUDE_RP)
         self.pitch_pid = PID(dt=dt, n=n, device=d, **self.ATTITUDE_RP)
         self.roll_rate_pid = PID(dt=dt, n=n, device=d, **self.RATE_RP)
@@ -85,6 +118,8 @@ class RCPIDController:
         self.pitch_fac = torch.tensor([0.0, 0.5, -0.5, 0.5, -0.5], device=d)
         self.yaw_fac = torch.tensor([0.0, 0.5, 0.5, -0.5, -0.5], device=d)
         self.debug = {}
+        self.vel_xy_gains = vel_xy
+        self.vel_z_gains = vel_z
 
     def reset(self, mask=None):
         for pid in (
@@ -121,10 +156,15 @@ class RCPIDController:
         self.vx_pid.set_input_filter_all(err_fwd)
         accel_fwd = torch.clamp(
             self.vx_pid.get_pid(),
-            -self.MAX_HORIZ_ACCEL, self.MAX_HORIZ_ACCEL)
+            -self.max_horiz_accel, self.max_horiz_accel)
+        target_vy = getattr(task, "target_vy", torch.zeros_like(task.target_vx))
+        err_right = target_vy - v_right
+        self.vy_pid.set_input_filter_all(err_right)
+        accel_right_tracking = self.vy_pid.get_pid()
+        accel_right_damping = -self.side_damp_p * v_right
         accel_right = torch.clamp(
-            -self.SIDE_DAMP_P * v_right,
-            -self.MAX_HORIZ_ACCEL, self.MAX_HORIZ_ACCEL)
+            accel_right_tracking + accel_right_damping,
+            -self.max_horiz_accel, self.max_horiz_accel)
 
         if self.use_head_motor:
             mass = self._mass(model)
@@ -137,16 +177,34 @@ class RCPIDController:
             head_accel = torch.zeros(self.n, device=self.device)
 
         residual_fwd_accel = accel_fwd - head_accel
-        target_pitch = torch.clamp(-residual_fwd_accel / self.gravity, -self.MAX_TILT, self.MAX_TILT)
-        target_roll = torch.clamp(accel_right / self.gravity, -self.MAX_TILT, self.MAX_TILT)
+        target_pitch = torch.clamp(
+            -residual_fwd_accel / self.gravity, -self.max_tilt, self.max_tilt)
+        target_roll = torch.clamp(
+            accel_right / self.gravity, -self.max_tilt, self.max_tilt)
 
-        err_vz = task.target_vz - vz
+        target_vz = task.target_vz
+        if self.alt_floor is not None and self.alt_floor_buffer > 0.0:
+            _npos, _epos, altitude = model.get_position()
+            floor_margin = torch.clamp(
+                (self.alt_floor + self.alt_floor_buffer - altitude)
+                / self.alt_floor_buffer,
+                0.0, 1.0,
+            )
+            target_vz = torch.maximum(
+                target_vz,
+                floor_margin * self.alt_floor_vz_bias,
+            )
+        else:
+            floor_margin = torch.zeros(self.n, device=self.device)
+        self.alt_floor_margin = floor_margin
+
+        err_vz = target_vz - vz
         self.vz_pid.set_input_filter_all(err_vz)
         # RC task's vz convention is opposite to the LearningToFly climb-rate
         # sign, so positive vz error needs *more* lift.
         z_corr = torch.clamp(
             self.vz_pid.get_pid(),
-            -self.MAX_Z_THROTTLE_CORR, self.MAX_Z_THROTTLE_CORR)
+            -self.max_z_throttle_corr, self.max_z_throttle_corr)
         throttle = torch.clamp(
             self._hover_throttle(model) + z_corr,
             0.0, 1.0)
@@ -159,7 +217,7 @@ class RCPIDController:
 
         err_heading = wrap_pi(task.target_heading - heading)
         target_yaw_rate = torch.clamp(
-            self.YAW_P * err_heading, -self.MAX_YAW_RATE, self.MAX_YAW_RATE)
+            self.yaw_p * err_heading, -self.max_yaw_rate, self.max_yaw_rate)
 
         self.roll_pid.set_input_filter_all(target_roll - roll)
         self.pitch_pid.set_input_filter_all(target_pitch - pitch)
@@ -199,5 +257,9 @@ class RCPIDController:
             'roll_out': roll_out,
             'pitch_out': pitch_out,
             'yaw_out': yaw_out,
+            'alt_floor_margin': self.alt_floor_margin,
+            'vel_xy_kp': torch.full_like(throttle, self.vel_xy_gains['kp']),
+            'vel_xy_ki': torch.full_like(throttle, self.vel_xy_gains['ki']),
+            'vel_xy_kd': torch.full_like(throttle, self.vel_xy_gains['kd']),
         }
         return action
