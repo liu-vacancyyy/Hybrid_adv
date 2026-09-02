@@ -1,0 +1,123 @@
+# Ground-contact validation config for PX4 Gazebo Classic's standard_vtol.
+# This keeps the existing five-motor policy action interface while enabling a
+# four-point approximation of the SDF base_link collision box.
+
+task_name: hover
+model: gazebo
+
+# Policy / simulation rates. The policy remains at 50 Hz; contact is integrated
+# at 250 Hz through five vectorized physics substeps, matching Gazebo Classic.
+airspeed: 0.0
+noise_scale: 0.01
+solver: euler
+dt: 0.02
+ground_physics_substeps: 5
+max_steps: 1500
+num_agents: 1
+num_states: 12
+num_controls: 8
+num_actions: 5
+num_observation: 24
+
+# Gazebo Classic standard_vtol parameters.
+gazebo_mass: 5.0
+gazebo_Jx: 0.477708333333
+gazebo_Jy: 0.341666666667
+gazebo_Jz: 0.811041666667
+gazebo_g: 9.807
+gazebo_air_density: 1.2041
+gazebo_motor_tau_up: 0.0125
+gazebo_motor_tau_down: 0.025
+gazebo_rotor_drag_coefficient: 0.000106428
+gazebo_rolling_moment_coefficient: 0.000001
+
+# Four lower corners of the standard_vtol base_link collision box, expressed
+# in this simulator's body forward/right/down coordinates.
+ground_contact_enable: true
+ground_height: 0.0
+ground_contact_points:
+  - [ 0.275,  1.072, 0.095]
+  - [ 0.275, -1.072, 0.095]
+  - [-0.275,  1.072, 0.095]
+  - [-0.275, -1.072, 0.095]
+ground_contact_stiffness: 10000.0
+ground_contact_damping: 150.0
+ground_contact_friction: 0.7
+ground_contact_slip_speed: 0.05
+ground_contact_max_normal_force: 5000.0
+
+# Spawn at the static spring equilibrium with stopped motors. Use spawn_mode:
+# air with the same contact settings for drop/landing episodes.
+spawn_mode: ground
+ground_spawn_static_equilibrium: true
+ground_spawn_clearance: 0.0
+ground_init_roll_range: 0.0
+ground_init_pitch_range: 0.0
+ground_init_vel_range: 0.0
+ground_init_omega_range: 0.0
+
+# A normal touchdown remains active. Only damaging contact is a bad_done.
+ground_crash_max_touchdown_speed: 2.5
+ground_crash_max_penetration: 0.05
+ground_crash_max_roll_deg: 45.0
+ground_crash_max_pitch_deg: 45.0
+ground_crash_force_factor: 20.0
+
+# Other flight-envelope terminations.
+altitude_limit: 0.0
+max_velocity: 10.0
+min_alpha: -45
+max_alpha: 45
+min_beta: -30
+max_beta: 30
+max_omega: 3.0
+max_pitch: 60
+max_roll: 60
+termination_verbose: false
+color: Blue
+
+# Hover observation/reward. Position channels include altitude above the local
+# world origin; exact contact state remains privileged model diagnostics.
+hover_include_position_obs: true
+hover_pos_norm: 5.0
+hover_alt_norm: 2.0
+hover_force_norm: 15.0
+
+dr_mass: 0.0
+dr_inertia: 0.0
+min_altitude: 2.0
+max_altitude: 8.0
+init_roll_range: 0.0
+init_pitch_range: 0.0
+init_yaw_range: 3.14159265359
+init_vel_range: 0.0
+init_omega_range: 0.0
+
+enable_sensor_noise: true
+sensor_pos_std: 0.0
+sensor_xy_pos_std: 0.0
+sensor_alt_std: 0.0
+sensor_vel_std: 0.05
+sensor_att_std: 0.003
+sensor_omega_std: 0.0003394
+enable_wind: false
+enable_dryden_turbulence: false
+
+hover_w_alive: 0.2
+hover_w_xy: 3.0
+hover_w_alt: 1.5
+hover_w_yaw: 0.8
+hover_w_attitude: 1.0
+hover_w_vel: 1.0
+hover_w_omega: 0.5
+hover_w_smooth: 0.4
+hover_sig_xy: 1.5
+hover_sig_alt: 0.5
+hover_sig_yaw: 0.2
+hover_sig_attitude: 0.2
+hover_sig_vel: 1.5
+hover_sig_omega: 1.5
+hover_sig_smooth: 500.0
+hover_bad_done_base: 50.0
+hover_bad_done_per_step: 3.0
+max_check_interval: 1000

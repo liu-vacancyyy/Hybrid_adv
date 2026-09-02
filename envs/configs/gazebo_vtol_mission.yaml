@@ -1,0 +1,170 @@
+# GPU-vectorized PX4 Gazebo Classic standard_vtol mission training.
+# Local navigation coordinates are north/east/altitude-up in metres.
+task_name: vtol_mission
+model: gazebo
+
+# 50 Hz policy and 250 Hz contact physics, matching Gazebo Classic worlds.
+dt: 0.02
+ground_physics_substeps: 5
+solver: euler
+max_steps: 3000
+num_agents: 1
+num_states: 12
+num_controls: 8
+num_actions: 8
+num_observation: 45
+airspeed: 0.0
+vec_auto_reset_on_done: true
+
+# standard_vtol rigid-body and actuator parameters.
+gazebo_mass: 5.0
+gazebo_Jx: 0.477708333333
+gazebo_Jy: 0.341666666667
+gazebo_Jz: 0.811041666667
+gazebo_g: 9.807
+gazebo_air_density: 1.2041
+gazebo_motor_tau_up: 0.0125
+gazebo_motor_tau_down: 0.025
+gazebo_rotor_drag_coefficient: 0.000106428
+gazebo_rolling_moment_coefficient: 0.000001
+action_is_gazebo_control: false
+enable_action_filter: true
+action_filter_alpha: 0.35
+
+# Four-point approximation of the standard_vtol collision box.
+ground_contact_enable: true
+ground_height: 0.0
+ground_contact_points:
+  - [ 0.275,  1.072, 0.095]
+  - [ 0.275, -1.072, 0.095]
+  - [-0.275,  1.072, 0.095]
+  - [-0.275, -1.072, 0.095]
+ground_contact_stiffness: 10000.0
+ground_contact_damping: 150.0
+ground_contact_friction: 0.7
+ground_contact_slip_speed: 0.05
+ground_contact_max_normal_force: 5000.0
+spawn_mode: ground
+ground_spawn_static_equilibrium: true
+ground_spawn_clearance: 0.0
+ground_init_roll_range: 0.0
+ground_init_pitch_range: 0.0
+ground_init_vel_range: 0.0
+ground_init_omega_range: 0.0
+
+# GPS sample-and-hold signal consumed by the mission policy.
+gps_enable: true
+gps_update_rate_hz: 10.0
+gps_horizontal_std: 0.35
+gps_vertical_std: 0.50
+mission_gps_age_norm: 0.20
+
+# Mission geometry and phase gates. Change mission_landing_n/e to move the pad.
+mission_start_n: 0.0
+mission_start_e: 0.0
+mission_landing_n: 200.0
+mission_landing_e: 0.0
+mission_landing_altitude: 0.095
+mission_landing_heading: 0.0
+mission_cruise_altitude: 25.0
+mission_landing_hover_altitude: 8.0
+mission_takeoff_clearance: 1.0
+mission_approach_distance: 60.0
+mission_descent_capture_radius: 15.0
+mission_rotor_climb_speed: 2.0
+mission_transition_complete_speed: 11.0
+mission_cruise_speed: 14.0
+mission_approach_speed: 5.0
+mission_backtransition_complete_speed: 6.0
+mission_phase_min_steps: [10, 25, 40, 40, 25, 0]
+# Flight-mode manager: pusher off and surfaces neutral in vertical phases.
+mission_gate_vertical_actuators: true
+
+# Phase-randomized starts shorten training. Set false for full-mission evaluation.
+mission_curriculum_enable: true
+mission_curriculum_phase_weights: [0.30, 0.14, 0.14, 0.14, 0.14, 0.14]
+mission_curriculum_cross_track_std: 2.0
+mission_curriculum_heading_std_deg: 5.0
+
+# Safe-landing definition.
+mission_landing_radius: 3.0
+mission_landing_max_speed: 1.0
+mission_landing_max_sink_speed: 0.6
+mission_landing_max_tilt_deg: 12.0
+mission_landing_settle_steps: 15
+
+# Safety envelope. bad_done is also used as constrained-PPO cost.
+ground_crash_max_touchdown_speed: 1.5
+ground_crash_max_penetration: 0.05
+ground_crash_max_roll_deg: 45.0
+ground_crash_max_pitch_deg: 45.0
+ground_crash_force_factor: 20.0
+mission_max_cross_track: 50.0
+mission_route_margin: 30.0
+mission_max_altitude: 50.0
+mission_min_safe_cruise_altitude: 4.0
+max_velocity: 25.0
+max_pitch: 60.0
+max_roll: 60.0
+max_omega: 4.0
+max_omega_norm: 6.0
+min_alpha: -25.0
+max_alpha: 35.0
+min_beta: -25.0
+max_beta: 25.0
+acceleration_limit: 35.0
+overload_bad_done_persist_steps: 3
+termination_verbose: false
+
+# Reward: fast waypoint progress plus continuous safety margins.
+mission_w_progress: 4.0
+mission_w_altitude: 1.0
+mission_w_speed: 0.8
+mission_w_heading: 0.8
+mission_w_waypoint: 0.5
+mission_w_phase_bonus: 30.0
+mission_w_time: 0.03
+mission_w_attitude_safety: 0.8
+mission_w_rate_safety: 0.25
+mission_w_aero_safety: 0.5
+mission_w_sink_safety: 1.5
+mission_w_action_smooth: 0.15
+mission_w_mode_efficiency: 0.2
+mission_reward_altitude_sigma: 4.0
+mission_reward_speed_sigma: 3.0
+mission_reward_heading_sigma: 0.35
+mission_reward_waypoint_sigma: 12.0
+mission_reward_safe_tilt_deg: 25.0
+mission_reward_safe_rate: 1.5
+mission_reward_safe_alpha_deg: 18.0
+mission_reward_safe_beta_deg: 12.0
+mission_reward_safe_sink_speed: 1.0
+mission_reward_progress_clip: 2.0
+mission_success_bonus: 500.0
+mission_failure_penalty: 250.0
+mission_timeout_penalty: 100.0
+
+# Observation normalizers and non-GPS sensor noise.
+mission_distance_norm: 200.0
+mission_altitude_norm: 25.0
+mission_speed_norm: 20.0
+mission_vertical_speed_norm: 8.0
+mission_rate_norm: 3.0
+enable_sensor_noise: true
+sensor_vel_std: 0.05
+sensor_att_std: 0.003
+sensor_omega_std: 0.0003394
+
+# Explicitly disabled for this first training setup.
+enable_wind: false
+enable_dryden_turbulence: false
+dr_mass: 0.0
+dr_inertia: 0.0
+min_altitude: 2.0
+max_altitude: 8.0
+init_roll_range: 0.0
+init_pitch_range: 0.0
+init_yaw_range: 0.0
+init_vel_range: 0.0
+init_omega_range: 0.0
+color: Blue

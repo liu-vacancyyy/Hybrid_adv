@@ -293,6 +293,31 @@ class F16SimRunner(Runner):
                     self._fmt(self._as_float(infos, "constraint/lagrange_after_update"), 3),
                 )
             )
+        mission_phase_parts = []
+        for phase_name in (
+            'takeoff', 'rotor_climb', 'transition', 'fixed_wing',
+            'back_transition', 'vertical_landing',
+        ):
+            value = self._as_float(
+                infos, f'mission/phase_{phase_name}_fraction'
+            )
+            if value is not None:
+                mission_phase_parts.append(f'{phase_name}={value:.2f}')
+        if mission_phase_parts:
+            logging.info(
+                "        mission phases=[{}] landing_dist={}m waypoint_dist={}m "
+                "success={} failure={}".format(
+                    ' '.join(mission_phase_parts),
+                    self._fmt(self._as_float(
+                        infos, 'mission/landing_distance_mean'), 1),
+                    self._fmt(self._as_float(
+                        infos, 'mission/waypoint_distance_mean'), 1),
+                    self._fmt(self._as_float(
+                        infos, 'mission/success_count'), 0),
+                    self._fmt(self._as_float(
+                        infos, 'mission/failure_count'), 0),
+                )
+            )
 
     def _append_progress_csv(self, infos, episode, episodes, elapsed, fps):
         csv_path = Path(self.run_dir) / "training_progress.csv"
@@ -322,6 +347,19 @@ class F16SimRunner(Runner):
         ]
         for mode_id in range(10):
             fields.append(f"rc_human/mode_{mode_id}_fraction")
+        fields.extend([
+            'mission/waypoint_distance_mean',
+            'mission/landing_distance_mean',
+            'mission/gps_age_mean',
+            'mission/success_count',
+            'mission/failure_count',
+        ])
+        for phase_name in (
+            'takeoff', 'rotor_climb', 'transition', 'fixed_wing',
+            'back_transition', 'vertical_landing',
+        ):
+            fields.append(f'mission/phase_{phase_name}_fraction')
+            fields.append(f'mission/start_{phase_name}_fraction')
 
         row = {
             "update": episode,

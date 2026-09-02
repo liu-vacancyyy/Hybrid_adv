@@ -1,0 +1,16 @@
+# PX4 shell commands for the RLHover HIL experiment.
+#
+# Apply after selecting the HIL Standard VTOL QuadPlane airframe, then reboot.
+# Adjust RC_MAP_AUX1 to the real 1-based RC channel used for the RLHover switch.
+# The proxy reads the raw RC channel and does not need PX4 Offboard mode.
+# If the same channel was previously used for Return/Loiter/Offboard, disable
+# those PX4 switch functions so the host proxy is the only owner of RLHover.
+
+param set SYS_HITL 1
+param set COM_RC_IN_MODE 1
+param set RC_MAP_AUX1 7
+param set RC_MAP_RETURN_SW 0
+param set RC_MAP_LOITER_SW 0
+param set RC_MAP_OFFB_SW 0
+param set CBRK_SUPPLY_CHK 894281
+param save

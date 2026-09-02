@@ -19,6 +19,7 @@ from tasks.simulink_task import SimulinkTask
 from tasks.hover_task import HoverTask
 from tasks.velocity_hover_task import VelocityHoverTask
 from tasks.circle_task import CircleTask
+from tasks.vtol_mission_task import VTOLMissionTask
 
 class ControlEnv(BaseEnv):
     """
@@ -70,6 +71,10 @@ class ControlEnv(BaseEnv):
             self.task = VelocityHoverTask(self.config, self.n, self.device, random_seed)
         elif task_name == 'circle':
             self.task = CircleTask(self.config, self.n, self.device, random_seed)
+        elif task_name == 'vtol_mission':
+            self.task = VTOLMissionTask(
+                self.config, self.n, self.device, random_seed
+            )
         else:
             raise NotImplementedError
     

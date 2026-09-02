@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from Gazebo.ground_contact import StandardVTOLGroundContact
+
 
 class GazeboVTOLDynamics(nn.Module):
     """Gazebo Classic standard_vtol dynamics approximation.
@@ -39,6 +41,12 @@ class GazeboVTOLDynamics(nn.Module):
         self._last_motor_thrust = None
         self._last_aero_force_body = None
         self._last_aero_moment_body = None
+        self._last_ground_force_body = None
+        self._last_ground_moment_body = None
+        self._last_ground_diagnostics = None
+
+        self.ground_contact = StandardVTOLGroundContact(config)
+        self.ground_contact_enabled = self.ground_contact.enabled
 
         self.rotor_pos = (
             (0.35, 0.35, -0.07),
@@ -289,9 +297,9 @@ class GazeboVTOLDynamics(nn.Module):
             moment_total = moment_total + moment_i
         return force_total, moment_total
 
-    def nlplant(self, x):
-        xdot = torch.zeros_like(x)
-
+    @staticmethod
+    def kinematic_derivatives(x):
+        """Position/Euler derivatives for body-FRD velocity and angular rate."""
         phi = x[:, 3]
         theta = x[:, 4]
         psi = x[:, 5]
@@ -311,18 +319,45 @@ class GazeboVTOLDynamics(nn.Module):
         spsi = torch.sin(psi)
         cpsi = torch.cos(psi)
 
-        xdot[:, 0] = U * (ct_raw * cpsi) + V * (sphi * cpsi * st - cphi * spsi) + W * (cphi * st * cpsi + sphi * spsi)
-        xdot[:, 1] = U * (ct_raw * spsi) + V * (sphi * spsi * st + cphi * cpsi) + W * (cphi * st * spsi - sphi * cpsi)
-        xdot[:, 2] = U * st - V * (sphi * ct_raw) - W * (cphi * ct_raw)
-        xdot[:, 3] = P + tt * (Q * sphi + R * cphi)
-        xdot[:, 4] = Q * cphi - R * sphi
-        xdot[:, 5] = (Q * sphi + R * cphi) / ct
+        kinematics = torch.zeros((x.shape[0], 6), device=x.device, dtype=x.dtype)
+        kinematics[:, 0] = U * (ct_raw * cpsi) + V * (sphi * cpsi * st - cphi * spsi) + W * (cphi * st * cpsi + sphi * spsi)
+        kinematics[:, 1] = U * (ct_raw * spsi) + V * (sphi * spsi * st + cphi * cpsi) + W * (cphi * st * spsi - sphi * cpsi)
+        kinematics[:, 2] = U * st - V * (sphi * ct_raw) - W * (cphi * ct_raw)
+        kinematics[:, 3] = P + tt * (Q * sphi + R * cphi)
+        kinematics[:, 4] = Q * cphi - R * sphi
+        kinematics[:, 5] = (Q * sphi + R * cphi) / ct
+        return kinematics
+
+    def nlplant(self, x):
+        xdot = torch.zeros_like(x)
+
+        phi = x[:, 3]
+        theta = x[:, 4]
+        U = x[:, 6]
+        V = x[:, 7]
+        W = x[:, 8]
+        P = x[:, 9]
+        Q = x[:, 10]
+        R = x[:, 11]
+
+        st = torch.sin(theta)
+        ct_raw = torch.cos(theta)
+        sphi = torch.sin(phi)
+        cphi = torch.cos(phi)
+
+        xdot[:, 0:6] = self.kinematic_derivatives(x)
 
         wind_body = torch.zeros((x.shape[0], 3), device=x.device, dtype=x.dtype)
         motor_force, motor_moment, motor_thrust = self._motor_forces_moments(x, wind_body)
         aero_force, aero_moment = self._aero_forces_moments(x, wind_body)
-        force_body = motor_force + aero_force
-        moment_body = motor_moment + aero_moment
+        if self.ground_contact_enabled:
+            ground_force, ground_moment, ground_diagnostics = self.ground_contact.compute(x)
+        else:
+            ground_force = torch.zeros_like(motor_force)
+            ground_moment = torch.zeros_like(motor_moment)
+            ground_diagnostics = None
+        force_body = motor_force + aero_force + ground_force
+        moment_body = motor_moment + aero_moment + ground_moment
 
         mass, Jx, Jy, Jz = self._physics_terms(x)
 
@@ -339,6 +374,12 @@ class GazeboVTOLDynamics(nn.Module):
         self._last_motor_thrust = motor_thrust.detach()
         self._last_aero_force_body = aero_force.detach()
         self._last_aero_moment_body = aero_moment.detach()
+        self._last_ground_force_body = ground_force.detach()
+        self._last_ground_moment_body = ground_moment.detach()
+        if ground_diagnostics is not None:
+            self._last_ground_diagnostics = {
+                key: value.detach() for key, value in ground_diagnostics.items()
+            }
         return xdot
 
     def get_last_force_body(self, n, device):
@@ -355,3 +396,17 @@ class GazeboVTOLDynamics(nn.Module):
         if self._last_motor_thrust is None:
             return torch.zeros((n, 5), device=device)
         return self._last_motor_thrust.to(device=device)
+
+    def get_last_ground_force_body(self, n, device):
+        if self._last_ground_force_body is None:
+            return torch.zeros((n, 3), device=device)
+        return self._last_ground_force_body.to(device=device)
+
+    def get_last_ground_moment_body(self, n, device):
+        if self._last_ground_moment_body is None:
+            return torch.zeros((n, 3), device=device)
+        return self._last_ground_moment_body.to(device=device)
+
+    def get_ground_contact(self, state):
+        """Evaluate contact at ``state`` without advancing the simulation."""
+        return self.ground_contact.compute(state)

@@ -1,0 +1,6 @@
+numpy>=1.24
+onnx>=1.14
+onnxruntime>=1.16
+pymavlink>=2.4
+pyserial>=3.5
+PyYAML>=6.0

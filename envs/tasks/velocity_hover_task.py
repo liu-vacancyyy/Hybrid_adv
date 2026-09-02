@@ -11,6 +11,7 @@ from reward_functions.velocity_hover_reward import (
     VelocityHoverReward,
 )
 from hybrid_termination_conditions.low_altitude import LowAltitude
+from hybrid_termination_conditions.ground_collision import GroundCollision
 from hybrid_termination_conditions.extreme_angle import ExtremeAngle
 from hybrid_termination_conditions.extreme_omega import ExtremeOmega
 from hybrid_termination_conditions.extreme_state import ExtremeState
@@ -81,6 +82,8 @@ class VelocityHoverTask(BaseTask):
             HighSpeed(self.config),
             HoverTimeoutDone(self.config),
         ]
+        if bool(getattr(self.config, 'ground_contact_enable', False)):
+            self.termination_conditions.insert(1, GroundCollision(self.config))
 
     def reset(self, env):
         done = env.is_done.bool()

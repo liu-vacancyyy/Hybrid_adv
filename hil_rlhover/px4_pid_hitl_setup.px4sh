@@ -1,0 +1,14 @@
+# PX4 shell commands for stock PX4 PID HITL with Gazebo Classic standard_vtol_hitl.
+#
+# Run in QGroundControl MAVLink Console or PX4 nsh.
+# This selects the HIL Standard VTOL QuadPlane airframe and forces a clean
+# airframe parameter reload on the next boot.
+
+param set SYS_AUTOSTART 1002
+param set SYS_AUTOCONFIG 1
+param set SYS_HITL 1
+param set COM_RC_IN_MODE 1
+param set CBRK_SUPPLY_CHK 894281
+param set UAVCAN_ENABLE 0
+param save
+reboot

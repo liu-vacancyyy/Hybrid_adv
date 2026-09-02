@@ -89,11 +89,38 @@ class GPUVecEnv(VecEnv):
         assert hasattr(self.gpu_vec_env, "num_envs"), "Parameter of env must contain num_envs!"
         super().__init__(self.gpu_vec_env.num_envs, self.gpu_vec_env.observation_space, self.gpu_vec_env.action_space)
         self.agents = self.gpu_vec_env.num_agents
+        self.auto_reset_on_done = bool(getattr(
+            self.gpu_vec_env.config, 'vec_auto_reset_on_done', False
+        ))
+
+    @staticmethod
+    def _clone_info(value):
+        if torch.is_tensor(value):
+            return value.clone()
+        if isinstance(value, dict):
+            return {
+                key: GPUVecEnv._clone_info(item) for key, item in value.items()
+            }
+        return value
 
     def step(self, actions):
-        actions = torch.tensor(actions, device=self.gpu_vec_env.device, dtype=torch.float32)
+        actions = torch.as_tensor(
+            actions, device=self.gpu_vec_env.device, dtype=torch.float32
+        )
         actions = torch.reshape(actions, (self.num_envs * self.agents, self.gpu_vec_env.num_actions))
         obs, rews, dones, bad_dones, exceed_time_limits, infos = self.gpu_vec_env.step(actions)
+        if self.auto_reset_on_done:
+            reset_mask = dones | bad_dones | exceed_time_limits
+            if torch.any(reset_mask):
+                dones_out = dones.clone()
+                bad_dones_out = bad_dones.clone()
+                time_limits_out = exceed_time_limits.clone()
+                infos = self._clone_info(infos)
+                reset_obs = self.gpu_vec_env.reset()
+                obs = torch.where(reset_mask.reshape(-1, 1), reset_obs, obs)
+                dones = dones_out
+                bad_dones = bad_dones_out
+                exceed_time_limits = time_limits_out
         obs = torch.reshape(obs, (self.num_envs, self.agents, self.gpu_vec_env.num_observation))
         rews = torch.reshape(rews, (self.num_envs, self.agents, 1))
         dones = torch.reshape(dones, (self.num_envs, self.agents, 1))

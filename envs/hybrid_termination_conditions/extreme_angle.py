@@ -34,8 +34,7 @@ class ExtremeAngle(BaseTerminationCondition):
         bad_done = (torch.abs(roll) > self.max_roll) | (torch.abs(pitch) > self.max_pitch)
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
-        if torch.any(bad_done):
+        if getattr(self.config, 'termination_verbose', True) and torch.any(bad_done):
             self.log(f'extreme angle!')
-            if getattr(self.config, 'termination_verbose', True):
-                print(torch.sum(bad_done), 'extreme angle!')
+            print(torch.sum(bad_done), 'extreme angle!')
         return bad_done, done, exceed_time_limit, info

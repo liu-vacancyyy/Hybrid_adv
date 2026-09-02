@@ -1,0 +1,22 @@
+diff --git a/src/modules/commander/module.yaml b/src/modules/commander/module.yaml
+--- a/src/modules/commander/module.yaml
++++ b/src/modules/commander/module.yaml
+@@ -34,6 +34,7 @@ parameters:
+                 5: Return
+                 6: Acro
+                 7: Offboard
++                17: RLHover
+                 8: Stabilized
+                 12: Follow Me
+                 13: Precision Land
+diff --git a/src/modules/manual_control/ManualControl.cpp b/src/modules/manual_control/ManualControl.cpp
+--- a/src/modules/manual_control/ManualControl.cpp
++++ b/src/modules/manual_control/ManualControl.cpp
+@@ -590,6 +590,7 @@ int8_t ManualControl::navStateFromParam(int32_t param_value)
+ 		case 14: return vehicle_status_s::NAVIGATION_STATE_ORBIT;
+ 		case 15: return vehicle_status_s::NAVIGATION_STATE_AUTO_VTOL_TAKEOFF;
+ 		case 16: return vehicle_status_s::NAVIGATION_STATE_ALTITUDE_CRUISE;
++		case 17: return vehicle_status_s::NAVIGATION_STATE_OFFBOARD; // RLHover alias; host proxy owns ONNX actuator override.
+ 
+ 		case 100: return vehicle_status_s::NAVIGATION_STATE_EXTERNAL1;
+ 		case 101: return vehicle_status_s::NAVIGATION_STATE_EXTERNAL2;

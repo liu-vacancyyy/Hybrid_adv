@@ -26,6 +26,10 @@ class LowAltitude(BaseTerminationCondition):
         Returns:
             (tuple): (bad_done, done, exceed_time_limit, info)
         """
+        if bool(getattr(env.model, 'ground_contact_enabled', False)):
+            bad_done = torch.zeros(env.n, dtype=torch.bool, device=env.device)
+            return bad_done, bad_done.clone(), bad_done.clone(), info
+
         npos, epos, altitude = env.model.get_position()
         bad_done = (altitude - self.altitude_limit) < 0
         done = torch.zeros_like(bad_done)

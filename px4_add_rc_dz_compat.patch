@@ -1,0 +1,225 @@
+--- a/src/modules/rc_update/params.c
++++ b/src/modules/rc_update/params.c
+@@ -919,6 +919,222 @@
+  * @group Radio Calibration
+  */
+ PARAM_DEFINE_FLOAT(RC18_REV, 1.0f);
++
++/**
++ * RC channel 1 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC1_DZ, 30.0f);
++
++/**
++ * RC channel 2 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC2_DZ, 30.0f);
++
++/**
++ * RC channel 3 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC3_DZ, 30.0f);
++
++/**
++ * RC channel 4 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC4_DZ, 30.0f);
++
++/**
++ * RC channel 5 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC5_DZ, 0.0f);
++
++/**
++ * RC channel 6 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC6_DZ, 0.0f);
++
++/**
++ * RC channel 7 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC7_DZ, 0.0f);
++
++/**
++ * RC channel 8 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC8_DZ, 0.0f);
++
++/**
++ * RC channel 9 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC9_DZ, 0.0f);
++
++/**
++ * RC channel 10 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC10_DZ, 0.0f);
++
++/**
++ * RC channel 11 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC11_DZ, 0.0f);
++
++/**
++ * RC channel 12 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC12_DZ, 0.0f);
++
++/**
++ * RC channel 13 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC13_DZ, 0.0f);
++
++/**
++ * RC channel 14 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC14_DZ, 0.0f);
++
++/**
++ * RC channel 15 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC15_DZ, 0.0f);
++
++/**
++ * RC channel 16 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC16_DZ, 0.0f);
++
++/**
++ * RC channel 17 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC17_DZ, 0.0f);
++
++/**
++ * RC channel 18 deadzone
++ *
++ * Legacy radio calibration deadzone parameter kept for ground station compatibility.
++ *
++ * @min 0
++ * @max 300
++ * @unit us
++ * @group Radio Calibration
++ */
++PARAM_DEFINE_FLOAT(RC18_DZ, 0.0f);
+ 
+ /**
+  * RC channel count

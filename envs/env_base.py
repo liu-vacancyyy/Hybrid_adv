@@ -135,6 +135,8 @@ class BaseEnv(gym.Env):
         self.is_done[:] = 0
         self.bad_done[:] = 0
         self.exceed_time_limit[:] = 0
+        if hasattr(self.task, 'update_before_observation'):
+            self.task.update_before_observation(self)
         obs = self.obs()
         return obs
 
@@ -147,6 +149,8 @@ class BaseEnv(gym.Env):
         self.model.update(action)
         self.step_count += 1
 
+        if hasattr(self.task, 'update_before_observation'):
+            self.task.update_before_observation(self)
         obs = self.obs()
         info = self.info()
         done, bad_done, exceed_time_limit, info = self.done(info)
