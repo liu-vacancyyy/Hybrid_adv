@@ -57,6 +57,9 @@ class VTOLMissionTask(BaseTask):
         self.start_e = float(getattr(config, 'mission_start_e', 0.0))
         self.landing_n = float(getattr(config, 'mission_landing_n', 200.0))
         self.landing_e = float(getattr(config, 'mission_landing_e', 0.0))
+        self.randomize_target = bool(getattr(
+            config, 'mission_randomize_target', False
+        ))
         self.landing_altitude = float(
             getattr(config, 'mission_landing_altitude', 0.095)
         )
@@ -75,6 +78,28 @@ class VTOLMissionTask(BaseTask):
         self.route_unit_n = route_n / self.route_length
         self.route_unit_e = route_e / self.route_length
         self.route_heading = math.atan2(route_e, route_n)
+        self.target_distance_min = float(getattr(
+            config, 'mission_target_distance_min', self.route_length
+        ))
+        self.target_distance_max = float(getattr(
+            config, 'mission_target_distance_max', self.route_length
+        ))
+        self.target_bearing_min = math.radians(float(getattr(
+            config, 'mission_target_bearing_min_deg', 0.0
+        )))
+        self.target_bearing_max = math.radians(float(getattr(
+            config, 'mission_target_bearing_max_deg', 0.0
+        )))
+        if self.randomize_target:
+            if not 20.0 <= self.target_distance_min <= self.target_distance_max:
+                raise ValueError(
+                    'random VTOL target distances must satisfy '
+                    '20 <= min <= max'
+                )
+            if self.target_bearing_max <= self.target_bearing_min:
+                raise ValueError(
+                    'mission_target_bearing_max_deg must exceed the minimum'
+                )
 
         self.cruise_altitude = float(
             getattr(config, 'mission_cruise_altitude', 25.0)
@@ -91,7 +116,10 @@ class VTOLMissionTask(BaseTask):
         self.descent_capture_radius = float(
             getattr(config, 'mission_descent_capture_radius', 15.0)
         )
-        if not 5.0 < self.approach_distance < self.route_length:
+        shortest_route = (
+            self.target_distance_min if self.randomize_target else self.route_length
+        )
+        if not 5.0 < self.approach_distance < shortest_route:
             raise ValueError('mission_approach_distance must be inside the route')
         if not 0.0 < self.descent_capture_radius < self.approach_distance:
             raise ValueError(
@@ -178,6 +206,30 @@ class VTOLMissionTask(BaseTask):
         )
         self.final_heading = float(
             getattr(config, 'mission_landing_heading', self.route_heading)
+        )
+        self.final_heading_follows_route = bool(getattr(
+            config, 'mission_final_heading_follows_route', False
+        ))
+        self.goal_n = torch.full(
+            (self.n,), self.landing_n, dtype=torch.float32, device=self.device
+        )
+        self.goal_e = torch.full(
+            (self.n,), self.landing_e, dtype=torch.float32, device=self.device
+        )
+        self.route_length_batch = torch.full(
+            (self.n,), self.route_length, dtype=torch.float32, device=self.device
+        )
+        self.route_unit_n_batch = torch.full(
+            (self.n,), self.route_unit_n, dtype=torch.float32, device=self.device
+        )
+        self.route_unit_e_batch = torch.full(
+            (self.n,), self.route_unit_e, dtype=torch.float32, device=self.device
+        )
+        self.route_heading_batch = torch.full(
+            (self.n,), self.route_heading, dtype=torch.float32, device=self.device
+        )
+        self.final_heading_batch = torch.full(
+            (self.n,), self.final_heading, dtype=torch.float32, device=self.device
         )
 
         dwell = getattr(config, 'mission_phase_min_steps', [10, 25, 40, 40, 25, 0])
@@ -598,6 +650,44 @@ class VTOLMissionTask(BaseTask):
             self.curriculum_weights, count, replacement=True
         )
 
+    def _sample_mission_targets(self, reset):
+        """Assign one immutable goal to each episode in the reset subset."""
+        count = int(reset.sum().item())
+        if count == 0:
+            return
+
+        if self.randomize_target:
+            distance = self._uniform(
+                count, self.target_distance_min, self.target_distance_max
+            )
+            bearing = self._uniform(
+                count, self.target_bearing_min, self.target_bearing_max
+            )
+            goal_n = self.start_n + distance * torch.cos(bearing)
+            goal_e = self.start_e + distance * torch.sin(bearing)
+        else:
+            goal_n = torch.full(
+                (count,), self.landing_n, dtype=torch.float32, device=self.device
+            )
+            goal_e = torch.full(
+                (count,), self.landing_e, dtype=torch.float32, device=self.device
+            )
+
+        route_n = goal_n - self.start_n
+        route_e = goal_e - self.start_e
+        route_length = torch.sqrt(route_n * route_n + route_e * route_e)
+        route_heading = torch.atan2(route_e, route_n)
+        self.goal_n[reset] = goal_n
+        self.goal_e[reset] = goal_e
+        self.route_length_batch[reset] = route_length
+        self.route_unit_n_batch[reset] = route_n / route_length.clamp_min(1e-6)
+        self.route_unit_e_batch[reset] = route_e / route_length.clamp_min(1e-6)
+        self.route_heading_batch[reset] = route_heading
+        if self.final_heading_follows_route:
+            self.final_heading_batch[reset] = route_heading
+        else:
+            self.final_heading_batch[reset] = self.final_heading
+
     def reset(self, env):
         self._env_ref = env
         reset = (
@@ -611,6 +701,7 @@ class VTOLMissionTask(BaseTask):
         if not hasattr(env.model, 'get_gps_state'):
             raise TypeError('VTOLMissionTask requires GazeboModel GPS support')
 
+        self._sample_mission_targets(reset)
         sampled_phase = self._sample_start_phases(count)
         self.phase[reset] = sampled_phase
         self.start_phase[reset] = sampled_phase
@@ -646,21 +737,32 @@ class VTOLMissionTask(BaseTask):
         ground = reset & (self.phase == self.TAKEOFF)
         model.s[ground, 0] = self.start_n
         model.s[ground, 1] = self.start_e
-        model.s[ground, 5] = self.route_heading
+        model.s[ground, 5] = self.route_heading_batch[ground]
         model.set_initial_actuators(ground, [0.0, 0.0, 0.0, 0.0, 0.0])
 
+        fixed_wing_start = torch.clamp(
+            1.0 - self.approach_distance / self.route_length_batch,
+            min=0.21,
+        )
+        backtransition_start = torch.clamp(
+            1.0 - self.approach_distance / self.route_length_batch,
+            min=0.0,
+        )
+        capture_start = torch.clamp(
+            1.0 - self.descent_capture_radius / self.route_length_batch,
+            min=0.01,
+        )
         phase_ranges = {
             self.ROTOR_CLIMB: (0.00, 0.05, 2.0, self.cruise_altitude - 1.0, 0.0, 2.0),
             self.TRANSITION: (0.02, 0.20, self.cruise_altitude - 2.0,
                               self.cruise_altitude + 2.0, 4.0, self.transition_speed),
-            self.FIXED_WING: (0.20, max(0.21, 1.0 - self.approach_distance / self.route_length),
+            self.FIXED_WING: (0.20, fixed_wing_start,
                               self.cruise_altitude - 2.0, self.cruise_altitude + 2.0,
                               self.transition_speed, self.cruise_speed + 2.0),
-            self.BACK_TRANSITION: (max(0.0, 1.0 - self.approach_distance / self.route_length),
-                                   max(0.01, 1.0 - self.descent_capture_radius / self.route_length),
+            self.BACK_TRANSITION: (backtransition_start, capture_start,
                                    self.landing_hover_altitude, self.cruise_altitude,
                                    self.backtransition_speed, self.cruise_speed),
-            self.VERTICAL_LANDING: (max(0.0, 1.0 - self.descent_capture_radius / self.route_length),
+            self.VERTICAL_LANDING: (capture_start,
                                     1.0, self.landing_altitude + 1.0,
                                     self.landing_hover_altitude + 2.0, 0.0,
                                     self.backtransition_speed),
@@ -676,13 +778,13 @@ class VTOLMissionTask(BaseTask):
             )
             model.s[mask, 0] = (
                 self.start_n
-                + fraction[mask] * (self.landing_n - self.start_n)
-                - cross_track[mask] * self.route_unit_e
+                + fraction[mask] * (self.goal_n[mask] - self.start_n)
+                - cross_track[mask] * self.route_unit_e_batch[mask]
             )
             model.s[mask, 1] = (
                 self.start_e
-                + fraction[mask] * (self.landing_e - self.start_e)
-                + cross_track[mask] * self.route_unit_n
+                + fraction[mask] * (self.goal_e[mask] - self.start_e)
+                + cross_track[mask] * self.route_unit_n_batch[mask]
             )
             model.s[mask, 2] = self._uniform(self.n, alt_low, alt_high)[mask]
             model.s[mask, 3] = torch.randn(self.n, device=self.device)[mask] * 0.02
@@ -691,7 +793,7 @@ class VTOLMissionTask(BaseTask):
                 pitch += 0.07
             model.s[mask, 4] = pitch[mask]
             model.s[mask, 5] = (
-                self.route_heading
+                self.route_heading_batch[mask]
                 + torch.randn(self.n, device=self.device)[mask]
                 * self.curriculum_heading_std
             )
@@ -733,32 +835,36 @@ class VTOLMissionTask(BaseTask):
             env = self._env_ref
         if env is None:
             raise RuntimeError('VTOLMissionTask guidance requires an environment')
-        approach_n = self.landing_n - self.route_unit_n * self.approach_distance
-        approach_e = self.landing_e - self.route_unit_e * self.approach_distance
+        approach_n = (
+            self.goal_n - self.route_unit_n_batch * self.approach_distance
+        )
+        approach_e = (
+            self.goal_e - self.route_unit_e_batch * self.approach_distance
+        )
 
-        self.target_npos[:] = self.landing_n
-        self.target_epos[:] = self.landing_e
+        self.target_npos[:] = self.goal_n
+        self.target_epos[:] = self.goal_e
         terminal_altitude = (
             self.landing_hover_altitude
             if self.terminal_mode == 'hover'
             else self.landing_altitude
         )
         self.target_altitude[:] = terminal_altitude
-        self.target_heading[:] = self.final_heading
+        self.target_heading[:] = self.final_heading_batch
         self.target_speed[:] = 0.0
 
         vertical = (self.phase == self.TAKEOFF) | (self.phase == self.ROTOR_CLIMB)
         self.target_npos[vertical] = self.start_n
         self.target_epos[vertical] = self.start_e
         self.target_altitude[vertical] = self.cruise_altitude
-        self.target_heading[vertical] = self.route_heading
+        self.target_heading[vertical] = self.route_heading_batch[vertical]
         self.target_speed[vertical] = self.rotor_climb_speed
 
         cruise = (self.phase == self.TRANSITION) | (self.phase == self.FIXED_WING)
-        self.target_npos[cruise] = approach_n
-        self.target_epos[cruise] = approach_e
+        self.target_npos[cruise] = approach_n[cruise]
+        self.target_epos[cruise] = approach_e[cruise]
         self.target_altitude[cruise] = self.cruise_altitude
-        self.target_heading[cruise] = self.route_heading
+        self.target_heading[cruise] = self.route_heading_batch[cruise]
         self.target_speed[self.phase == self.TRANSITION] = self.transition_speed
         self.target_speed[self.phase == self.FIXED_WING] = self.cruise_speed
 
@@ -770,8 +876,8 @@ class VTOLMissionTask(BaseTask):
             # corridor and reach hover altitude only at the capture boundary.
             npos, epos, _ = env.model.get_position()
             distance = torch.sqrt(
-                (npos - self.landing_n) ** 2
-                + (epos - self.landing_e) ** 2
+                (npos - self.goal_n) ** 2
+                + (epos - self.goal_e) ** 2
             )
             fraction = (
                 (distance - self.descent_capture_radius)
@@ -782,7 +888,9 @@ class VTOLMissionTask(BaseTask):
                 + fraction[backtransition]
                 * (self.cruise_altitude - self.landing_hover_altitude)
             )
-            self.target_heading[backtransition] = self.route_heading
+            self.target_heading[backtransition] = self.route_heading_batch[
+                backtransition
+            ]
             self.target_speed[backtransition] = self.approach_speed
 
     def update_before_observation(self, env):
@@ -800,10 +908,10 @@ class VTOLMissionTask(BaseTask):
         contact = env.model.get_ground_contact_state()
         roll, pitch, _ = env.model.get_posture()
         distance_to_landing = torch.sqrt(
-            (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+            (npos - self.goal_n) ** 2 + (epos - self.goal_e) ** 2
         )
-        landing_dn = self.landing_n - npos
-        landing_de = self.landing_e - epos
+        landing_dn = self.goal_n - npos
+        landing_de = self.goal_e - epos
         p, q, _ = env.model.get_angular_velocity()
         closing_speed = (
             vel_n * landing_dn + vel_e * landing_de
@@ -866,7 +974,7 @@ class VTOLMissionTask(BaseTask):
         roll, pitch, _ = env.model.get_posture()
         contact = env.model.get_ground_contact_state()
         horizontal_error = torch.sqrt(
-            (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+            (npos - self.goal_n) ** 2 + (epos - self.goal_e) ** 2
         )
         horizontal_speed = torch.sqrt(
             (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
@@ -1089,8 +1197,8 @@ class VTOLMissionTask(BaseTask):
                 _, _, yaw = env.model.get_posture()
                 roll, pitch, _ = env.model.get_posture()
                 p, q, r = env.model.get_angular_velocity()
-                north_error = self.landing_n - npos
-                east_error = self.landing_e - epos
+                north_error = self.goal_n - npos
+                east_error = self.goal_e - epos
                 accel_n = (
                     self.vertical_landing_position_gain * north_error
                     - self.vertical_landing_horizontal_damping * vel_n
@@ -1270,10 +1378,10 @@ class VTOLMissionTask(BaseTask):
             npos, epos, _ = env.model.get_position()
             _, _, heading = env.model.get_posture()
             cross_track = (
-                -(npos - self.start_n) * self.route_unit_e
-                + (epos - self.start_e) * self.route_unit_n
+                -(npos - self.start_n) * self.route_unit_e_batch
+                + (epos - self.start_e) * self.route_unit_n_batch
             )
-            heading_error = wrap_PI(self.route_heading - heading)
+            heading_error = wrap_PI(self.route_heading_batch - heading)
             # The standard_vtol elevon convention produces a negative roll
             # acceleration for positive left-right differential. Invert the
             # geometric command so a positive heading/cross-track error turns
@@ -1318,10 +1426,10 @@ class VTOLMissionTask(BaseTask):
             npos, epos, _ = env.model.get_position()
             _, _, heading = env.model.get_posture()
             cross_track = (
-                -(npos - self.start_n) * self.route_unit_e
-                + (epos - self.start_e) * self.route_unit_n
+                -(npos - self.start_n) * self.route_unit_e_batch
+                + (epos - self.start_e) * self.route_unit_n_batch
             )
-            heading_error = wrap_PI(self.route_heading - heading)
+            heading_error = wrap_PI(self.route_heading_batch - heading)
             roll_command = -(
                 self.backtransition_nav_heading_gain * heading_error
                 + self.backtransition_nav_cross_track_gain * torch.atan(
@@ -1454,8 +1562,8 @@ class VTOLMissionTask(BaseTask):
             npos, epos, altitude = env.model.get_position()
             _, _, vel_up = env.model.get_world_velocity()
             distance = torch.sqrt(
-                (npos - self.landing_n) ** 2
-                + (epos - self.landing_e) ** 2
+                (npos - self.goal_n) ** 2
+                + (epos - self.goal_e) ** 2
             )
             distance_fraction = (
                 (distance - self.descent_capture_radius)
@@ -1523,8 +1631,8 @@ class VTOLMissionTask(BaseTask):
             npos, epos, _ = env.model.get_position()
             vel_n, vel_e, _ = env.model.get_world_velocity()
             distance = torch.sqrt(
-                (npos - self.landing_n) ** 2
-                + (epos - self.landing_e) ** 2
+                (npos - self.goal_n) ** 2
+                + (epos - self.goal_e) ** 2
             )
             horizontal_speed = torch.sqrt(
                 (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
@@ -1619,7 +1727,7 @@ class VTOLMissionTask(BaseTask):
         self.metric_waypoint_distance = self.previous_waypoint_distance
         npos, epos, _ = env.model.get_position()
         self.metric_landing_distance = torch.sqrt(
-            (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+            (npos - self.goal_n) ** 2 + (epos - self.goal_e) ** 2
         ).detach()
         self.metric_gps_age = env.model.get_gps_state()['age'].detach()
         self.training_success_count += self.mission_success(env).sum()
@@ -1669,7 +1777,7 @@ class VTOLMissionTask(BaseTask):
         climb_rate = env.model.get_climb_rate()
         contact = env.model.get_ground_contact_state()
         distance = torch.sqrt(
-            (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+            (npos - self.goal_n) ** 2 + (epos - self.goal_e) ** 2
         )
         radius = float(getattr(self.config, 'mission_landing_radius', 3.0))
         max_speed = float(getattr(self.config, 'mission_landing_max_speed', 1.0))
@@ -1738,8 +1846,8 @@ class VTOLMissionTask(BaseTask):
                 (vel_n * vel_n + vel_e * vel_e + vel_up * vel_up).clamp_min(0.0)
             )
 
-        landing_dn = self.landing_n - npos
-        landing_de = self.landing_e - epos
+        landing_dn = self.goal_n - npos
+        landing_de = self.goal_e - epos
         terminal_altitude = (
             self.landing_hover_altitude
             if self.terminal_mode == 'hover'
@@ -1750,12 +1858,12 @@ class VTOLMissionTask(BaseTask):
         waypoint_de = self.target_epos - epos
         waypoint_dalt = self.target_altitude - altitude
         along_track = (
-            (npos - self.start_n) * self.route_unit_n
-            + (epos - self.start_e) * self.route_unit_e
+            (npos - self.start_n) * self.route_unit_n_batch
+            + (epos - self.start_e) * self.route_unit_e_batch
         )
         cross_track = (
-            -(npos - self.start_n) * self.route_unit_e
-            + (epos - self.start_e) * self.route_unit_n
+            -(npos - self.start_n) * self.route_unit_e_batch
+            + (epos - self.start_e) * self.route_unit_n_batch
         )
         heading_error = wrap_PI(self.target_heading - heading)
         phase_one_hot = torch.nn.functional.one_hot(

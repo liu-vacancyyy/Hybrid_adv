@@ -235,6 +235,17 @@ class GazeboVTOLMissionTest(unittest.TestCase):
         env.task.curriculum_enabled = False
         return env
 
+    def _random_hover_mission_env(self, device='cpu', num_envs=1):
+        env = ControlEnv(
+            num_envs=num_envs,
+            config='gazebo_vtol_hover_random_mission',
+            model='GAZEBO',
+            random_seed=2,
+            device=device,
+        )
+        env.task.curriculum_enabled = False
+        return env
+
     def test_hover_mission_inherits_dynamics_and_starts_on_ground(self):
         env = self._hover_mission_env(num_envs=8)
         obs = env.reset()
@@ -246,6 +257,52 @@ class GazeboVTOLMissionTest(unittest.TestCase):
         self.assertEqual(int(env.config.ground_physics_substeps), 5)
         self.assertTrue(bool(env.model.on_ground.all()))
         self.assertEqual(tuple(obs.shape), (8, 45))
+
+    def test_random_hover_target_is_independent_per_environment(self):
+        env = self._random_hover_mission_env(num_envs=64)
+        env.reset()
+        task = env.task
+
+        distance = torch.sqrt(
+            (task.goal_n - task.start_n) ** 2
+            + (task.goal_e - task.start_e) ** 2
+        )
+        self.assertTrue(task.randomize_target)
+        self.assertTrue(bool((distance >= 250.0 - 1e-4).all()))
+        self.assertTrue(bool((distance <= 350.0 + 1e-4).all()))
+        self.assertGreater(int(torch.unique(task.goal_n).numel()), 32)
+        torch.testing.assert_close(
+            env.model.s[:, 5], task.route_heading_batch, atol=1e-6, rtol=0.0
+        )
+        torch.testing.assert_close(
+            task.final_heading_batch, task.route_heading_batch,
+            atol=1e-6, rtol=0.0,
+        )
+        self.assertTrue(bool(env.model.on_ground.all()))
+
+    def test_random_hover_resamples_only_finished_environment(self):
+        env = self._random_hover_mission_env(num_envs=8)
+        env.reset()
+        task = env.task
+        old_goal_n = task.goal_n.clone()
+        old_goal_e = task.goal_e.clone()
+
+        env.is_done.zero_()
+        env.bad_done.zero_()
+        env.exceed_time_limit.zero_()
+        env.is_done[3] = True
+        env.reset()
+
+        keep = torch.ones(8, dtype=torch.bool)
+        keep[3] = False
+        torch.testing.assert_close(task.goal_n[keep], old_goal_n[keep])
+        torch.testing.assert_close(task.goal_e[keep], old_goal_e[keep])
+        self.assertTrue(
+            bool(
+                (task.goal_n[3] != old_goal_n[3])
+                | (task.goal_e[3] != old_goal_e[3])
+            )
+        )
 
     def test_hover_target_uses_airborne_altitude(self):
         env = self._hover_mission_env()

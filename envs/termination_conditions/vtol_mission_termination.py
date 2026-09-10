@@ -34,12 +34,12 @@ class VTOLMissionBoundary(BaseTerminationCondition):
         npos, epos, altitude = env.model.get_position()
         contact = env.model.get_ground_contact_state()
         along_track = (
-            (npos - task.start_n) * task.route_unit_n
-            + (epos - task.start_e) * task.route_unit_e
+            (npos - task.start_n) * task.route_unit_n_batch
+            + (epos - task.start_e) * task.route_unit_e_batch
         )
         cross_track = (
-            -(npos - task.start_n) * task.route_unit_e
-            + (epos - task.start_e) * task.route_unit_n
+            -(npos - task.start_n) * task.route_unit_e_batch
+            + (epos - task.start_e) * task.route_unit_n_batch
         )
 
         # Once reverse transition has brought the aircraft inside the landing
@@ -47,7 +47,7 @@ class VTOLMissionBoundary(BaseTerminationCondition):
         # the vehicle must bleed forward speed before it can descend vertically.
         # Keep lateral deviation and all pre-capture route bounds strict.
         distance_to_landing = torch.sqrt(
-            (npos - task.landing_n) ** 2 + (epos - task.landing_e) ** 2
+            (npos - task.goal_n) ** 2 + (epos - task.goal_e) ** 2
         )
         landing_phase = (
             (task.phase == getattr(task, 'BACK_TRANSITION', -1))
@@ -57,7 +57,9 @@ class VTOLMissionBoundary(BaseTerminationCondition):
             distance_to_landing <= task.descent_capture_radius
         )
         along_track_before_start = along_track < -self.route_margin
-        along_track_after_end = along_track > task.route_length + self.route_margin
+        along_track_after_end = (
+            along_track > task.route_length_batch + self.route_margin
+        )
         along_track_overshoot = along_track_after_end & ~capture_corridor
 
         off_route = (
@@ -128,8 +130,10 @@ class VTOLMissionSuccess(BaseTerminationCondition):
         info['mission_start_phase'] = task.start_phase
         npos, epos, _ = env.model.get_position()
         info['mission_landing_error'] = torch.sqrt(
-            (npos - task.landing_n) ** 2 + (epos - task.landing_e) ** 2
+            (npos - task.goal_n) ** 2 + (epos - task.goal_e) ** 2
         )
+        info['mission_target_n'] = task.goal_n.clone()
+        info['mission_target_e'] = task.goal_e.clone()
         info['mission_elapsed_steps'] = env.step_count.clone()
         info['mission_touchdown_speed'] = (
             env.model.last_touchdown_vertical_speed.clone()

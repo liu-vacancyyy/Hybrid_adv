@@ -1,0 +1,12 @@
+# Point-to-point hover mission with one independent target per environment.
+extends: gazebo_vtol_hover_mission
+
+mission_randomize_target: true
+mission_target_distance_min: 250.0
+mission_target_distance_max: 350.0
+mission_target_bearing_min_deg: -180.0
+mission_target_bearing_max_deg: 180.0
+mission_final_heading_follows_route: true
+
+# Cover the largest sampled route without changing the observation shape.
+mission_distance_norm: 350.0

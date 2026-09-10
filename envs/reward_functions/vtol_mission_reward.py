@@ -181,7 +181,7 @@ class VTOLMissionReward(BaseRewardFunction):
             (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
         )
         distance_to_landing = torch.sqrt(
-            (npos - task.landing_n) ** 2 + (epos - task.landing_e) ** 2
+            (npos - task.goal_n) ** 2 + (epos - task.goal_e) ** 2
         )
         distance_fraction = (
             (distance_to_landing - task.descent_capture_radius)
@@ -219,8 +219,8 @@ class VTOLMissionReward(BaseRewardFunction):
              + previous_kinematics[:, 1] ** 2).clamp_min(0.0)
         )
         previous_distance = torch.sqrt(
-            (env.model.recent_s[:, 0] - task.landing_n) ** 2
-            + (env.model.recent_s[:, 1] - task.landing_e) ** 2
+            (env.model.recent_s[:, 0] - task.goal_n) ** 2
+            + (env.model.recent_s[:, 1] - task.goal_e) ** 2
         )
         previous_fraction = (
             (previous_distance - task.descent_capture_radius)
@@ -249,8 +249,8 @@ class VTOLMissionReward(BaseRewardFunction):
             torch.zeros_like(braking_shaping),
         )
 
-        landing_dn = task.landing_n - npos
-        landing_de = task.landing_e - epos
+        landing_dn = task.goal_n - npos
+        landing_de = task.goal_e - epos
         closing_speed = (
             vel_n * landing_dn + vel_e * landing_de
         ) / distance_to_landing.clamp_min(1e-6)
@@ -341,8 +341,8 @@ class VTOLMissionReward(BaseRewardFunction):
             acceleration / self.acceleration_limit - warning
         ) ** 2
         cross_track = (
-            -(npos - task.start_n) * task.route_unit_e
-            + (epos - task.start_e) * task.route_unit_n
+            -(npos - task.start_n) * task.route_unit_e_batch
+            + (epos - task.start_e) * task.route_unit_n_batch
         )
         route_constraint = torch.relu(
             cross_track.abs() / self.max_cross_track - warning

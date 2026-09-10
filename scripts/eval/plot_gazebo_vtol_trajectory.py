@@ -200,10 +200,18 @@ def main():
 
     positions = np.asarray(positions)
     phases = np.asarray(phases, dtype=np.int64)
+    task = env.gpu_vec_env.task
+    goal_n = getattr(task, 'goal_n', None)
+    goal_e = getattr(task, 'goal_e', None)
+    terminal_altitude = (
+        task.landing_hover_altitude
+        if getattr(task, 'terminal_mode', 'landing') == 'hover'
+        else task.landing_altitude
+    )
     target = np.array([
-        float(getattr(env.gpu_vec_env.task, 'landing_n', 200.0)),
-        float(getattr(env.gpu_vec_env.task, 'landing_e', 0.0)),
-        float(getattr(env.gpu_vec_env.task, 'landing_altitude', 0.095)),
+        float(goal_n[0]) if goal_n is not None else float(task.landing_n),
+        float(goal_e[0]) if goal_e is not None else float(task.landing_e),
+        float(terminal_altitude),
     ])
     elapsed_s = (len(positions) - 1) * float(env.gpu_vec_env.model.dt)
     landing_error = float(np.linalg.norm(positions[-1, :2] - target[:2]))
