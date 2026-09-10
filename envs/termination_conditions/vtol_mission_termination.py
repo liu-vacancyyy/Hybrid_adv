@@ -42,10 +42,28 @@ class VTOLMissionBoundary(BaseTerminationCondition):
             + (epos - task.start_e) * task.route_unit_n
         )
 
+        # Once reverse transition has brought the aircraft inside the landing
+        # capture circle, a small amount of along-track overshoot is expected:
+        # the vehicle must bleed forward speed before it can descend vertically.
+        # Keep lateral deviation and all pre-capture route bounds strict.
+        distance_to_landing = torch.sqrt(
+            (npos - task.landing_n) ** 2 + (epos - task.landing_e) ** 2
+        )
+        landing_phase = (
+            (task.phase == getattr(task, 'BACK_TRANSITION', -1))
+            | (task.phase == getattr(task, 'VERTICAL_LANDING', -1))
+        )
+        capture_corridor = landing_phase & (
+            distance_to_landing <= task.descent_capture_radius
+        )
+        along_track_before_start = along_track < -self.route_margin
+        along_track_after_end = along_track > task.route_length + self.route_margin
+        along_track_overshoot = along_track_after_end & ~capture_corridor
+
         off_route = (
             (cross_track.abs() > self.max_cross_track)
-            | (along_track < -self.route_margin)
-            | (along_track > task.route_length + self.route_margin)
+            | along_track_before_start
+            | along_track_overshoot
         )
         altitude_violation = altitude > self.max_altitude
         cruise_phase = (
@@ -54,10 +72,18 @@ class VTOLMissionBoundary(BaseTerminationCondition):
             | (task.phase == task.BACK_TRANSITION)
         )
         too_low = cruise_phase & (altitude < self.min_cruise_altitude)
+        hover_terminal_contact = (
+            getattr(task, 'terminal_mode', 'landing') == 'hover'
+        ) & (task.phase == task.VERTICAL_LANDING)
         premature_contact = (
             contact['on_ground']
-            & (task.phase >= task.ROTOR_CLIMB)
-            & (task.phase <= task.BACK_TRANSITION)
+            & (
+                (
+                    (task.phase >= task.ROTOR_CLIMB)
+                    & (task.phase <= task.BACK_TRANSITION)
+                )
+                | hover_terminal_contact
+            )
         )
         finite = torch.isfinite(env.model.s).all(dim=1)
         nonfinite = ~finite
@@ -72,6 +98,10 @@ class VTOLMissionBoundary(BaseTerminationCondition):
         done = torch.zeros_like(bad_done)
         timeout = torch.zeros_like(bad_done)
         info['mission_off_route'] = off_route
+        info['mission_capture_corridor'] = capture_corridor
+        info['mission_along_track'] = along_track
+        info['mission_cross_track'] = cross_track
+        info['mission_landing_distance'] = distance_to_landing
         info['mission_altitude_violation'] = altitude_violation | too_low
         info['mission_premature_contact'] = premature_contact
         info['mission_nonfinite'] = nonfinite
@@ -89,7 +119,7 @@ class VTOLMissionSuccess(BaseTerminationCondition):
     def get_termination(self, task, env, info=None):
         if info is None:
             info = {}
-        success = task.landing_success(env)
+        success = task.mission_success(env)
         bad_done = torch.zeros_like(success)
         timeout = torch.zeros_like(success)
         info['mission_success'] = success
@@ -104,6 +134,8 @@ class VTOLMissionSuccess(BaseTerminationCondition):
         info['mission_touchdown_speed'] = (
             env.model.last_touchdown_vertical_speed.clone()
         )
+        if getattr(task, 'terminal_mode', 'landing') == 'hover':
+            info['mission_hover_stable_steps'] = task.hover_stable_count.clone()
         if getattr(self.config, 'termination_verbose', True) and torch.any(success):
             self.log('VTOL mission completed with a safe landing')
         return bad_done, success, timeout, info

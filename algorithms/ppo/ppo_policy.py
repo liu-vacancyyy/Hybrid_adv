@@ -4,7 +4,8 @@ from .ppo_critic import PPOCritic
 
 
 class PPOPolicy:
-    def __init__(self, args, obs_space, act_space, device=torch.device("cpu")):
+    def __init__(self, args, obs_space, act_space, device=torch.device("cpu"),
+                 critic_obs_space=None):
 
         self.args = args
         self.device = device
@@ -12,6 +13,7 @@ class PPOPolicy:
         self.lr = args.lr
 
         self.obs_space = obs_space
+        self.critic_obs_space = critic_obs_space or obs_space
         self.act_space = act_space
         self.use_cost_constraints = (
             bool(getattr(args, 'use_cost_constraints', False))
@@ -19,9 +21,9 @@ class PPOPolicy:
         )
 
         self.actor = PPOActor(args, self.obs_space, self.act_space, self.device)
-        self.critic = PPOCritic(args, self.obs_space, self.device)
+        self.critic = PPOCritic(args, self.critic_obs_space, self.device)
         self.cost_critic = (
-            PPOCritic(args, self.obs_space, self.device)
+            PPOCritic(args, self.critic_obs_space, self.device)
             if self.use_cost_constraints else None
         )
 
@@ -33,13 +35,17 @@ class PPOPolicy:
             params.append({'params': self.cost_critic.parameters()})
         self.optimizer = torch.optim.Adam(params, lr=self.lr)
 
-    def get_actions(self, obs, rnn_states_actor, rnn_states_critic, masks):
+    def get_actions(self, obs, rnn_states_actor, rnn_states_critic, masks,
+                    critic_obs=None):
         """
         Returns:
             values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
         """
         actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks)
-        values, rnn_states_critic = self.critic(obs, rnn_states_critic, masks)
+        value_input = obs if critic_obs is None else critic_obs
+        values, rnn_states_critic = self.critic(
+            value_input, rnn_states_critic, masks
+        )
         return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
 
     def get_values(self, obs, rnn_states_critic, masks):
@@ -58,13 +64,15 @@ class PPOPolicy:
         )
         return values, rnn_states_cost_critic
 
-    def evaluate_actions(self, obs, rnn_states_actor, rnn_states_critic, action, masks, active_masks=None):
+    def evaluate_actions(self, obs, rnn_states_actor, rnn_states_critic, action,
+                         masks, active_masks=None, critic_obs=None):
         """
         Returns:
             values, action_log_probs, dist_entropy
         """
         action_log_probs, dist_entropy = self.actor.evaluate_actions(obs, rnn_states_actor, action, masks, active_masks)
-        values, _ = self.critic(obs, rnn_states_critic, masks)
+        value_input = obs if critic_obs is None else critic_obs
+        values, _ = self.critic(value_input, rnn_states_critic, masks)
         return values, action_log_probs, dist_entropy
 
     def evaluate_cost_values(self, obs, rnn_states_cost_critic, masks):
@@ -97,4 +105,7 @@ class PPOPolicy:
             self.cost_critic.eval()
 
     def copy(self):
-        return PPOPolicy(self.args, self.obs_space, self.act_space, self.device)
+        return PPOPolicy(
+            self.args, self.obs_space, self.act_space, self.device,
+            critic_obs_space=self.critic_obs_space,
+        )

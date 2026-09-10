@@ -87,12 +87,30 @@ class MuNet(nn.Module):
         x = self.fc(x)
         return x
 
+    def set_output_mean(self, mean):
+        mean = torch.as_tensor(mean, dtype=self.fc[0].bias.dtype)
+        mean = mean.clamp(-0.999999, 0.999999)
+        with torch.no_grad():
+            self.fc[0].bias.copy_(torch.atanh(mean))
+
 
 class DiagGaussian(nn.Module):
-    def __init__(self, num_inputs, num_outputs, gain=0.01):
+    def __init__(self, num_inputs, num_outputs, gain=0.01, log_std_init=0.0,
+                 mean_init=None):
         super(DiagGaussian, self).__init__()
         self.mu_net = MuNet(num_inputs, num_outputs, gain)
-        self.log_std = nn.Parameter(torch.zeros(num_outputs))
+        if mean_init is not None:
+            mean = torch.as_tensor(mean_init, dtype=torch.float32).flatten()
+            if mean.numel() == 1:
+                mean = mean.expand(num_outputs)
+            if mean.numel() != num_outputs:
+                raise ValueError(
+                    'action_mean_init must contain one value or one value per action'
+                )
+            self.mu_net.set_output_mean(mean)
+        self.log_std = nn.Parameter(torch.full(
+            (num_outputs,), float(log_std_init)
+        ))
         self._num_outputs = num_outputs
 
     def forward(self, x):

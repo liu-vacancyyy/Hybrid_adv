@@ -9,6 +9,31 @@ e_sq = f * (2-f)
 pi = 3.14159265359
 
 
+def _load_config_data(filepath, config_dir, loading):
+    filepath = os.path.abspath(filepath)
+    if filepath in loading:
+        chain = ' -> '.join(loading + [filepath])
+        raise ValueError(f'cyclic config inheritance: {chain}')
+
+    assert os.path.exists(filepath), f'config path {filepath} does not exist'
+    with open(filepath, 'r', encoding='utf-8') as f:
+        config_data = yaml.load(f, Loader=yaml.FullLoader) or {}
+    if not isinstance(config_data, dict):
+        raise TypeError(f'config {filepath} must contain a YAML mapping')
+
+    base_name = config_data.pop('extends', None)
+    if base_name is None:
+        return config_data
+
+    base_name = str(base_name)
+    if not base_name.endswith('.yaml'):
+        base_name += '.yaml'
+    base_path = os.path.join(config_dir, base_name)
+    merged = _load_config_data(base_path, config_dir, loading + [filepath])
+    merged.update(config_data)
+    return merged
+
+
 def parse_config(filename):
     """Parse F16Sim config file.
 
@@ -18,11 +43,11 @@ def parse_config(filename):
     Returns:
         (EnvConfig): a custom class which parsing dict into object.
     """
-    filepath = os.path.join(get_root_dir(), 'configs', f'{filename}.yaml')
+    config_dir = os.path.join(get_root_dir(), 'configs')
+    filepath = os.path.join(config_dir, f'{filename}.yaml')
     assert os.path.exists(filepath), \
         f'config path {filepath} does not exist. Please pass in a string that represents the file path to the config yaml.'
-    with open(filepath, 'r', encoding='utf-8') as f:
-        config_data = yaml.load(f, Loader=yaml.FullLoader)
+    config_data = _load_config_data(filepath, config_dir, [])
 
     return type('EnvConfig', (object,), config_data)
 
@@ -247,4 +272,3 @@ def distance_fn(R):
     mask2 = (R > 1) & (R <= 3)
     result = 1 * mask1 + (3 - R) / 2 * mask2
     return result
-            

@@ -34,7 +34,8 @@ class ReplayBuffer(Buffer):
     def _cast(x: np.ndarray):
         return x.transpose(1, 2, 0, *range(3, x.ndim)).reshape(-1, *x.shape[3:])
 
-    def __init__(self, args, num_agents, obs_space, act_space):
+    def __init__(self, args, num_agents, obs_space, act_space,
+                 critic_obs_space=None):
         # buffer config
         self.buffer_size = args.buffer_size
         self.n_rollout_threads = args.n_rollout_threads
@@ -52,15 +53,24 @@ class ReplayBuffer(Buffer):
         self.cost_advantage_normalize = bool(
             getattr(args, 'cost_advantage_normalize', True)
         )
+        self.use_privileged_critic = critic_obs_space is not None
         # rnn config
         self.recurrent_hidden_size = args.recurrent_hidden_size
         self.recurrent_hidden_layers = args.recurrent_hidden_layers
 
         obs_shape = get_shape_from_space(obs_space)
+        critic_obs_shape = get_shape_from_space(
+            critic_obs_space if critic_obs_space is not None else obs_space
+        )
         act_shape = get_shape_from_space(act_space)
 
         # (o_0, a_0, r_0, d_1, o_1, ... , d_T, o_T)
         self.obs = np.zeros((self.buffer_size + 1, self.n_rollout_threads, self.num_agents, *obs_shape), dtype=np.float32)
+        self.critic_obs = np.zeros(
+            (self.buffer_size + 1, self.n_rollout_threads, self.num_agents,
+             *critic_obs_shape),
+            dtype=np.float32,
+        )
         self.actions = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, *act_shape), dtype=np.float32)
         self.rewards = np.zeros((self.buffer_size, self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         # NOTE: masks[t] = 1 - dones[t-1], which represents whether obs[t] is a terminal state
@@ -116,6 +126,7 @@ class ReplayBuffer(Buffer):
                costs: Union[np.ndarray, None] = None,
                cost_value_preds: Union[np.ndarray, None] = None,
                rnn_states_cost_critic: Union[np.ndarray, None] = None,
+               critic_obs: Union[np.ndarray, None] = None,
                **kwargs):
         """Insert numpy data.
         Args:
@@ -130,6 +141,9 @@ class ReplayBuffer(Buffer):
             bad_masks:          bad_mask[t+1] = bad_done_{t}
         """
         self.obs[self.step + 1] = obs.copy()
+        self.critic_obs[self.step + 1] = (
+            obs if critic_obs is None else critic_obs
+        ).copy()
         self.actions[self.step] = actions.copy()
         self.rewards[self.step] = rewards.copy()
         self.masks[self.step + 1] = masks.copy()
@@ -152,6 +166,7 @@ class ReplayBuffer(Buffer):
     def after_update(self):
         """Copy last timestep data to first index. Called after update to model."""
         self.obs[0] = self.obs[-1].copy()
+        self.critic_obs[0] = self.critic_obs[-1].copy()
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.rnn_states_actor[0] = self.rnn_states_actor[-1].copy()
@@ -162,6 +177,7 @@ class ReplayBuffer(Buffer):
     def clear(self):
         self.step = 0
         self.obs = np.zeros_like(self.obs, dtype=np.float32)
+        self.critic_obs = np.zeros_like(self.critic_obs, dtype=np.float32)
         self.actions = np.zeros_like(self.actions, dtype=np.float32)
         self.rewards = np.zeros_like(self.rewards, dtype=np.float32)
         self.masks = np.ones_like(self.masks, dtype=np.float32)
@@ -303,6 +319,11 @@ class ReplayBuffer(Buffer):
 
         # Flatten: (T, N, A, *shape) -> (T*N*A*len(buffer), *shape)
         obs = np.vstack([ReplayBuffer._cast(buf.obs[:-1]) for buf in buffer])
+        use_privileged_critic = buffer[0].use_privileged_critic
+        if use_privileged_critic:
+            critic_obs = np.vstack([
+                ReplayBuffer._cast(buf.critic_obs[:-1]) for buf in buffer
+            ])
         actions = np.vstack([ReplayBuffer._cast(buf.actions) for buf in buffer])
         masks = np.vstack([ReplayBuffer._cast(buf.masks[:-1]) for buf in buffer])
         old_action_log_probs = np.vstack([ReplayBuffer._cast(buf.action_log_probs) for buf in buffer])
@@ -331,6 +352,8 @@ class ReplayBuffer(Buffer):
 
         for indices in sampler:
             obs_batch = obs[indices]
+            if use_privileged_critic:
+                critic_obs_batch = critic_obs[indices]
             actions_batch = actions[indices]
             masks_batch = masks[indices]
             old_action_log_probs_batch = old_action_log_probs[indices]
@@ -339,11 +362,14 @@ class ReplayBuffer(Buffer):
             value_preds_batch = value_preds[indices]
             rnn_states_actor_batch = rnn_states_actor[indices]
             rnn_states_critic_batch = rnn_states_critic[indices]
-            batch = [
-                obs_batch, actions_batch, masks_batch, old_action_log_probs_batch,
+            batch = [obs_batch]
+            if use_privileged_critic:
+                batch.append(critic_obs_batch)
+            batch.extend([
+                actions_batch, masks_batch, old_action_log_probs_batch,
                 advantages_batch, returns_batch, value_preds_batch,
                 rnn_states_actor_batch, rnn_states_critic_batch,
-            ]
+            ])
             if use_cost_constraints:
                 batch.extend([
                     cost_advantages[indices],
@@ -389,6 +415,11 @@ class ReplayBuffer(Buffer):
 
         # Transpose and reshape parallel data into sequential data
         obs = np.vstack([ReplayBuffer._cast(buf.obs[:-1]) for buf in buffer])
+        use_privileged_critic = buffer[0].use_privileged_critic
+        if use_privileged_critic:
+            critic_obs = np.vstack([
+                ReplayBuffer._cast(buf.critic_obs[:-1]) for buf in buffer
+            ])
         actions = np.vstack([ReplayBuffer._cast(buf.actions) for buf in buffer])
         masks = np.vstack([ReplayBuffer._cast(buf.masks[:-1]) for buf in buffer])
         old_action_log_probs = np.vstack([ReplayBuffer._cast(buf.action_log_probs) for buf in buffer])
@@ -418,6 +449,8 @@ class ReplayBuffer(Buffer):
 
         for indices in sampler:
             obs_batch = []
+            if use_privileged_critic:
+                critic_obs_batch = []
             actions_batch = []
             masks_batch = []
             old_action_log_probs_batch = []
@@ -440,6 +473,10 @@ class ReplayBuffer(Buffer):
                 ind = index * data_chunk_length
                 # size [T + 1, N, Dim] => [T, N, Dim] => [N, T, Dim] => [N * T, Dim] => [L, Dim]
                 obs_batch.append(obs[ind:ind + data_chunk_length])
+                if use_privileged_critic:
+                    critic_obs_batch.append(
+                        critic_obs[ind:ind + data_chunk_length]
+                    )
                 actions_batch.append(actions[ind:ind + data_chunk_length])
                 masks_batch.append(masks[ind:ind + data_chunk_length])
                 old_action_log_probs_batch.append(old_action_log_probs[ind:ind + data_chunk_length])
@@ -463,6 +500,8 @@ class ReplayBuffer(Buffer):
 
             # These are all from_numpys of size (L, N, Dim)
             obs_batch = np.stack(obs_batch, axis=1)
+            if use_privileged_critic:
+                critic_obs_batch = np.stack(critic_obs_batch, axis=1)
             actions_batch = np.stack(actions_batch, axis=1)
             masks_batch = np.stack(masks_batch, axis=1)
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch, axis=1)
@@ -479,17 +518,24 @@ class ReplayBuffer(Buffer):
 
             # Flatten the (L, N, ...) from_numpys to (L * N, ...)
             obs_batch = ReplayBuffer._flatten(L, N, obs_batch)
+            if use_privileged_critic:
+                critic_obs_batch = ReplayBuffer._flatten(
+                    L, N, critic_obs_batch
+                )
             actions_batch = ReplayBuffer._flatten(L, N, actions_batch)
             masks_batch = ReplayBuffer._flatten(L, N, masks_batch)
             old_action_log_probs_batch = ReplayBuffer._flatten(L, N, old_action_log_probs_batch)
             advantages_batch = ReplayBuffer._flatten(L, N, advantages_batch)
             returns_batch = ReplayBuffer._flatten(L, N, returns_batch)
             value_preds_batch = ReplayBuffer._flatten(L, N, value_preds_batch)
-            batch = [
-                obs_batch, actions_batch, masks_batch, old_action_log_probs_batch,
+            batch = [obs_batch]
+            if use_privileged_critic:
+                batch.append(critic_obs_batch)
+            batch.extend([
+                actions_batch, masks_batch, old_action_log_probs_batch,
                 advantages_batch, returns_batch, value_preds_batch,
                 rnn_states_actor_batch, rnn_states_critic_batch,
-            ]
+            ])
             if use_cost_constraints:
                 cost_advantages_batch = np.stack(cost_advantages_batch, axis=1)
                 cost_returns_batch = np.stack(cost_returns_batch, axis=1)

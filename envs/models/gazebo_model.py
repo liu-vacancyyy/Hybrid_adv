@@ -44,6 +44,7 @@ class GazeboModel(BaseModel):
         self.recent_u = torch.zeros((self.n, self.num_controls), device=self.device)
 
         self.dynamics = GazeboVTOLDynamics(config)
+        self.aero_force_scale = torch.ones(self.n, device=self.device)
         self.ground_contact_enabled = self.dynamics.ground_contact_enabled
         default_substeps = 5 if self.ground_contact_enabled else 1
         self.ground_physics_substeps = int(
@@ -99,6 +100,19 @@ class GazeboModel(BaseModel):
         self.time_constant_down = float(getattr(self.config, 'gazebo_motor_tau_down', 0.025))
         self.motor_cmd_scaling = torch.tensor([1500., 1500., 1500., 1500., 5500.], device=self.device)
         self.motor_omega_max = torch.tensor([1500., 1500., 1500., 1500., 3500.], device=self.device)
+        # Task-level flight-mode logic can set this per-environment cap.  It is
+        # applied after action filtering, where it cannot be bypassed by a
+        # stale pusher command from the preceding control step.
+        self.pusher_omega_cap = torch.full(
+            (self.n,), float('inf'), device=self.device
+        )
+        # Captures the cap for the current update.  ``pusher_omega_cap`` is
+        # cleared by ``_map_action`` so a later phase cannot inherit it, while
+        # this cache lets the motor lag filter enforce the same physical cap on
+        # the filtered motor state.
+        self._mapped_pusher_omega_cap = torch.full(
+            (self.n,), float('inf'), device=self.device
+        )
         self.surface_limit = torch.tensor([0.53, 0.53, 0.53], device=self.device)
         self.motor_omega = torch.zeros((self.n, 5), device=self.device)
 
@@ -213,6 +227,7 @@ class GazeboModel(BaseModel):
             self._Jz_t[reset] = self.dynamics.nominal_Jz
 
         self.dynamics.set_physics(self.mass_curr, self._Jx_t, self._Jy_t, self._Jz_t)
+        self.aero_force_scale[reset] = 1.0
         self._set_hover_controls(air_reset)
 
         if ground_size > 0:
@@ -239,9 +254,16 @@ class GazeboModel(BaseModel):
         self.recent_s[reset] = self.s[reset]
         self.recent_u[reset] = self.u[reset]
         self.filtered_action[reset] = 0.0
-        self.filtered_action_valid[reset] = False
+        if not self.action_is_gazebo_control:
+            self.filtered_action[reset, 0:5] = -1.0
         self._reset_ground_diagnostics(reset)
+        self.filtered_action_valid[reset] = (
+            self.enable_action_filter & self.on_ground[reset]
+        )
+        self.pusher_omega_cap[reset] = float('inf')
+        self._mapped_pusher_omega_cap[reset] = float('inf')
         self._reset_gps(reset)
+        self.aero_force_scale[reset] = 1.0
 
     def set_initial_actuators(self, mask, motor_omega, surfaces=None):
         """Set batched actuator state without applying motor-filter transients."""
@@ -324,6 +346,33 @@ class GazeboModel(BaseModel):
             alpha = self.action_filter_alpha
             valid = self.filtered_action_valid.unsqueeze(-1)
             action = torch.where(valid, (1.0 - alpha) * self.filtered_action + alpha * action, action)
+
+        # Apply task-provided pusher limits after the command filter.  This is
+        # deliberately in the actuator mapper: limiting only the incoming
+        # policy action would allow a stale filtered command to exceed the
+        # current transition envelope.
+        pusher_cap = self.pusher_omega_cap
+        self._mapped_pusher_omega_cap.copy_(pusher_cap)
+        finite_cap = torch.isfinite(pusher_cap)
+        if torch.any(finite_cap):
+            if self.action_is_gazebo_control:
+                normalized_cap = pusher_cap / self.motor_cmd_scaling[4]
+            else:
+                normalized_cap = (
+                    2.0 * pusher_cap / self.motor_cmd_scaling[4] - 1.0
+                )
+            normalized_cap = normalized_cap.clamp(-1.0, 1.0)
+            action[:, 4] = torch.where(
+                finite_cap,
+                torch.minimum(action[:, 4], normalized_cap),
+                action[:, 4],
+            )
+
+        if self.enable_action_filter:
+            # Keep the cache synchronized even when alpha=1 disables the
+            # interpolation.  This is useful for diagnostics and ensures a
+            # subsequent re-enable of filtering cannot resurrect a stale
+            # command from before a phase-specific actuator cap.
             self.filtered_action = action.clone()
             self.filtered_action_valid[:] = True
 
@@ -336,6 +385,13 @@ class GazeboModel(BaseModel):
 
         omega_ref = motor_cmd * self.motor_cmd_scaling.reshape(1, 5)
         omega_ref = torch.minimum(omega_ref, self.motor_omega_max.reshape(1, 5))
+        omega_ref[:, 4] = torch.minimum(
+            omega_ref[:, 4], self.pusher_omega_cap
+        )
+        # The cap is one-step state supplied by the task.  Clear it after the
+        # mapping so a direct model update cannot inherit a previous phase's
+        # limit.
+        self.pusher_omega_cap.fill_(float('inf'))
         return omega_ref, surfaces
 
     def _update_motor_filter(self, omega_ref):
@@ -344,6 +400,17 @@ class GazeboModel(BaseModel):
                           torch.full_like(omega_ref, self.time_constant_down))
         alpha = torch.exp(-self.dt / tau)
         self.motor_omega = alpha * self.motor_omega + (1.0 - alpha) * omega_ref
+        finite_cap = torch.isfinite(self._mapped_pusher_omega_cap)
+        if torch.any(finite_cap):
+            self.motor_omega[:, 4] = torch.where(
+                finite_cap,
+                torch.minimum(
+                    self.motor_omega[:, 4],
+                    self._mapped_pusher_omega_cap,
+                ),
+                self.motor_omega[:, 4],
+            )
+        self._mapped_pusher_omega_cap.fill_(float('inf'))
 
     def get_extended_state(self):
         return self.dynamics.nlplant(torch.hstack((self.s, self.u)))

@@ -44,6 +44,14 @@ class GazeboVTOLDynamics(nn.Module):
         self._last_ground_force_body = None
         self._last_ground_moment_body = None
         self._last_ground_diagnostics = None
+        # Per-environment blend factor set by the VTOL task during mode
+        # transitions.  Rotor-borne reverse transition should not apply the
+        # full fixed-wing aerodynamic moment at large alpha/beta.
+        self.aero_scale = None
+        # Optional per-environment parasitic/air-brake drag coefficient in
+        # N/(m/s)^2. The VTOL task enables this only during reverse
+        # transition; it remains separate from the wing force blend.
+        self.extra_drag_coefficient = 0.0
 
         self.ground_contact = StandardVTOLGroundContact(config)
         self.ground_contact_enabled = self.ground_contact.enabled
@@ -262,7 +270,10 @@ class GazeboVTOLDynamics(nn.Module):
         cl = torch.where(alpha > alpha_stall, cl_hi, torch.where(alpha < -alpha_stall, cl_lo, cl_mid))
 
         if surface['control_index'] is not None:
-            cl = cl + surface['control_joint_rad_to_cl'] * x[:, surface['control_index']]
+            # ``x`` is [12 rigid-body states, 8 actuator states].  Surface
+            # indices are relative to the actuator vector, not to ``x``.
+            control_index = 12 + surface['control_index']
+            cl = cl + surface['control_joint_rad_to_cl'] * x[:, control_index]
 
         cd_mid = surface['cda'] * alpha * cos_sweep
         cd_hi = (surface['cda'] * alpha_stall
@@ -295,6 +306,10 @@ class GazeboVTOLDynamics(nn.Module):
             force_i, moment_i = self._surface_force_moment(x, surface, wind_body)
             force_total = force_total + force_i
             moment_total = moment_total + moment_i
+        if self.aero_scale is not None:
+            scale = self.aero_scale.to(device=x.device, dtype=x.dtype).reshape(-1, 1)
+            force_total = force_total * scale
+            moment_total = moment_total * scale
         return force_total, moment_total
 
     @staticmethod
@@ -350,6 +365,20 @@ class GazeboVTOLDynamics(nn.Module):
         wind_body = torch.zeros((x.shape[0], 3), device=x.device, dtype=x.dtype)
         motor_force, motor_moment, motor_thrust = self._motor_forces_moments(x, wind_body)
         aero_force, aero_moment = self._aero_forces_moments(x, wind_body)
+        extra_drag = self.extra_drag_coefficient
+        if not torch.is_tensor(extra_drag):
+            extra_drag = torch.full(
+                (x.shape[0],), float(extra_drag), device=x.device, dtype=x.dtype
+            )
+        else:
+            extra_drag = extra_drag.to(device=x.device, dtype=x.dtype).reshape(-1)
+            if extra_drag.numel() == 1:
+                extra_drag = extra_drag.expand(x.shape[0])
+        forward_speed = x[:, 6]
+        drag_x = -extra_drag * forward_speed * forward_speed.abs()
+        aero_force = aero_force + torch.stack(
+            (drag_x, torch.zeros_like(drag_x), torch.zeros_like(drag_x)), dim=1
+        )
         if self.ground_contact_enabled:
             ground_force, ground_moment, ground_diagnostics = self.ground_contact.compute(x)
         else:

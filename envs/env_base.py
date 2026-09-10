@@ -32,6 +32,10 @@ class BaseEnv(gym.Env):
         self.is_done = torch.ones(self.n, dtype=torch.bool, device=self.device)
         self.bad_done = torch.ones(self.n, dtype=torch.bool, device=self.device)
         self.exceed_time_limit = torch.ones(self.n, dtype=torch.bool, device=self.device)
+        # The GPU runner may apply deterministic task-level actuator gates
+        # before calling step so PPO stores the exact executed action.  This
+        # marker prevents BaseEnv from applying the same gate a second time.
+        self._action_preprocessed = False
         self.create_records = False
         self.wind_disturbance = None
         self._init_wind_disturbance()
@@ -53,12 +57,20 @@ class BaseEnv(gym.Env):
         return self.task.observation_space
 
     @property
+    def critic_observation_space(self):
+        return self.task.critic_observation_space
+
+    @property
     def action_space(self):
         return self.task.action_space
     
     @property
     def num_observation(self):
         return self.task.num_observation
+
+    @property
+    def num_critic_observation(self):
+        return self.task.num_critic_observation
     
     @property
     def num_actions(self):
@@ -66,6 +78,9 @@ class BaseEnv(gym.Env):
 
     def obs(self):
         return self.task.get_obs(self)
+
+    def critic_obs(self):
+        return self.task.get_critic_obs(self)
 
     def reward(self):
         return self.task.get_reward(self)
@@ -120,7 +135,7 @@ class BaseEnv(gym.Env):
                 pqr_body=gust_pqr,
             )
 
-    def reset(self):
+    def reset(self, update_observation=True):
         done = self.is_done.bool()
         bad_done = self.bad_done.bool()
         exceed_time_limit = self.exceed_time_limit.bool()
@@ -135,20 +150,33 @@ class BaseEnv(gym.Env):
         self.is_done[:] = 0
         self.bad_done[:] = 0
         self.exceed_time_limit[:] = 0
-        if hasattr(self.task, 'update_before_observation'):
+        # A marker belongs to the action immediately preceding one step.  An
+        # externally requested reset starts a new episode and must discard it;
+        # the internal reset used by step() preserves it until it is consumed.
+        if update_observation:
+            self._action_preprocessed = False
+        if update_observation and hasattr(self.task, 'update_before_observation'):
             self.task.update_before_observation(self)
         obs = self.obs()
         return obs
 
     def step(self, action, render=False, count=0):
-        self.reset()
+        # Reset completed episodes without running the observation callback.
+        # The callback below must execute exactly once for the new control
+        # state, otherwise phase hold counters advance twice per step.
+        self.reset(update_observation=False)
         # Let task override action (e.g. PID takeover when near target)
-        if hasattr(self.task, 'maybe_override_action'):
+        if self._action_preprocessed:
+            self._action_preprocessed = False
+        elif hasattr(self.task, 'maybe_override_action'):
             action = self.task.maybe_override_action(self, action)
         self._apply_environment_wind(advance=True)
         self.model.update(action)
         self.step_count += 1
 
+        # The post-physics callback is the single control-timestep sample
+        # used by hold timers and phase gates.  It must run once even when no
+        # episode was reset at the start of this step.
         if hasattr(self.task, 'update_before_observation'):
             self.task.update_before_observation(self)
         obs = self.obs()

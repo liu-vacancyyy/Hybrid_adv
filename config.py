@@ -129,6 +129,15 @@ def _get_network_config(parser: argparse.ArgumentParser):
                        help="Whether to apply LayerNorm to the feature extraction inputs")
     group.add_argument("--gain", type=float, default=0.01,
                        help="The gain # of last action layer")
+    group.add_argument("--action-log-std-init", type=float, default=0.0,
+                       help="Initial log standard deviation for continuous actions "
+                            "(default: 0.0, equivalent to std=1.0)")
+    group.add_argument("--action-mean-init", type=float, nargs='*', default=None,
+                       help="Optional initial continuous-action means. Provide one value "
+                            "or one value per action dimension.")
+    group.add_argument("--reset-action-log-std", type=float, default=None,
+                       help="After loading an actor checkpoint, reset all continuous-action "
+                            "log standard deviations to this value.")
     group.add_argument("--use-prior", action='store_true', default=False,
                        help="Whether to use prior hunman info to update network, use only on missile shoot task")
     return parser
@@ -210,8 +219,8 @@ def _get_ppo_config(parser: argparse.ArgumentParser):
     group.add_argument("--target-kl", type=float, default=0.0,
                        help='Skip PPO minibatch updates when approximate KL exceeds this value. '
                             '0 disables the guard.')
-    group.add_argument("--max-log-ratio", type=float, default=20.0,
-                       help='Clamp PPO log probability ratio before exp to avoid inf ratios.')
+    group.add_argument("--max-log-ratio", type=float, default=4.0,
+                       help='Clamp PPO log probability ratio before exp; values above 5 are capped for stability.')
     group.add_argument("--use-safety-aux", action='store_true', default=False,
                        help='Enable auxiliary actor-head prediction of bad_done within a future horizon.')
     group.add_argument("--safety-aux-horizon", type=int, default=25,

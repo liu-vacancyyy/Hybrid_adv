@@ -76,7 +76,12 @@ class Runner(object):
     @torch.no_grad()
     def compute(self):
         self.policy.prep_rollout()
-        next_values = self.policy.get_values(np.concatenate(self.buffer.obs[-1]),
+        value_obs = (
+            self.buffer.critic_obs[-1]
+            if getattr(self.buffer, 'use_privileged_critic', False)
+            else self.buffer.obs[-1]
+        )
+        next_values = self.policy.get_values(np.concatenate(value_obs),
                                              np.concatenate(self.buffer.rnn_states_critic[-1]),
                                              np.concatenate(self.buffer.masks[-1]))
         next_values = np.array(np.split(_t2n(next_values), self.buffer.n_rollout_threads))
@@ -87,7 +92,7 @@ class Runner(object):
             and hasattr(self.buffer, 'rnn_states_cost_critic')
         ):
             next_cost_values, _ = self.policy.get_cost_values(
-                np.concatenate(self.buffer.obs[-1]),
+                np.concatenate(value_obs),
                 np.concatenate(self.buffer.rnn_states_cost_critic[-1]),
                 np.concatenate(self.buffer.masks[-1]),
             )

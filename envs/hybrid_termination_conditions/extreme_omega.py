@@ -44,6 +44,9 @@ class ExtremeOmega(BaseTerminationCondition):
             message = 'angular velocity norm is too high!'
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
+        if info is None:
+            info = {}
+        info['extreme_omega'] = bad_done
         if getattr(self.config, 'termination_verbose', True) and torch.any(bad_done):
             self.log(message)
             print(torch.sum(bad_done), message)

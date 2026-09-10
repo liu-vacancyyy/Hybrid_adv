@@ -30,7 +30,7 @@ def parse_args():
 
 def build_actor_args():
     args = get_config().parse_args([])
-    args.use_safety_aux = True
+    args.use_safety_aux = False
     return args
 
 
@@ -41,6 +41,10 @@ def load_actor(checkpoint, env, device):
     state = torch.load(checkpoint, map_location=device)
     if isinstance(state, dict):
         state = state.get('policy', state.get('state_dict', state))
+    state = {
+        key: value for key, value in state.items()
+        if not key.startswith('safety_out.')
+    }
     actor.load_state_dict(state)
     actor.eval()
     return actor
@@ -78,6 +82,23 @@ def main():
     success_count = 0
     failure_count = 0
     timeout_count = 0
+    failure_reasons = {}
+    failure_phases = {}
+    failure_flag_keys = {
+        'ground_crash_hard_touchdown',
+        'ground_crash_penetration',
+        'ground_crash_tipover',
+        'ground_crash_force',
+        'extreme_angle',
+        'extreme_omega',
+        'high_speed',
+        'overload',
+        'extreme_aero_state',
+        'mission_off_route',
+        'mission_altitude_violation',
+        'mission_premature_contact',
+        'mission_nonfinite',
+    }
     success_times = []
     landing_errors = []
     touchdown_speeds = []
@@ -113,6 +134,29 @@ def main():
         success_count += int(success[indices].sum())
         failure_count += int(bad[indices].sum())
         timeout_count += int(timeout[indices].sum())
+        # Keep a reason breakdown for safety failures.  ``info`` is returned
+        # as GPU tensors by GPUVecEnv; convert only the terminal batch here so
+        # evaluation remains inexpensive for large vectorized rollouts.
+        if bad[indices].any():
+            for key, value in info.items():
+                if key not in failure_flag_keys:
+                    continue
+                try:
+                    flags = value.detach().cpu().numpy().astype(bool).reshape(-1)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if flags.shape[0] != cli.num_envs:
+                    continue
+                count = int(flags[indices].sum())
+                if count:
+                    failure_reasons[key] = failure_reasons.get(key, 0) + count
+            try:
+                phases = info['mission_phase'].detach().cpu().numpy().reshape(-1)
+                for phase in phases[indices[bad[indices]]]:
+                    phase = int(phase)
+                    failure_phases[phase] = failure_phases.get(phase, 0) + 1
+            except (KeyError, AttributeError, TypeError, ValueError):
+                pass
         success_indices = indices[success[indices]]
         success_times.extend((elapsed[success_indices] * 0.02).tolist())
         landing_errors.extend(error[success_indices].tolist())
@@ -132,6 +176,16 @@ def main():
     print(f'safe_landings={success_count}')
     print(f'safety_failures={failure_count}')
     print(f'timeouts={timeout_count}')
+    if failure_reasons:
+        print('failure_reasons=' + ','.join(
+            f'{key}:{value}' for key, value in sorted(
+                failure_reasons.items(), key=lambda item: (-item[1], item[0])
+            )
+        ))
+    if failure_phases:
+        print('failure_phases=' + ','.join(
+            f'{key}:{value}' for key, value in sorted(failure_phases.items())
+        ))
     print(f'mean_success_time_s={mean_time:.3f}')
     print(f'mean_landing_error_m={mean_error:.3f}')
     print(f'mean_touchdown_speed_mps={mean_touchdown_speed:.3f}')

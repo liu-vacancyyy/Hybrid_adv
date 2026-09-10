@@ -6,7 +6,8 @@ from .distributions import BetaShootBernoulli, Categorical, DiagGaussian, Bernou
 
 
 class ACTLayer(nn.Module):
-    def __init__(self, act_space, input_dim, hidden_size, activation_id, gain):
+    def __init__(self, act_space, input_dim, hidden_size, activation_id, gain,
+                 action_log_std_init=0.0, action_mean_init=None):
         super(ACTLayer, self).__init__()
         self._mlp_actlayer = False
         self._continuous_action = False
@@ -25,7 +26,13 @@ class ACTLayer(nn.Module):
         elif isinstance(act_space, gym.spaces.Box):
             self._continuous_action = True
             action_dim = act_space.shape[0]
-            self.action_out = DiagGaussian(input_dim, action_dim, gain)
+            self.action_out = DiagGaussian(
+                input_dim,
+                action_dim,
+                gain,
+                action_log_std_init,
+                action_mean_init,
+            )
         elif isinstance(act_space, gym.spaces.MultiBinary):
             action_dim = act_space.shape[0]
             self.action_out = Bernoulli(input_dim, action_dim, gain)
@@ -125,9 +132,9 @@ class ACTLayer(nn.Module):
                 action_dist = action_out(x)
                 action_log_probs.append(action_dist.log_probs(act.unsqueeze(-1)))
                 if active_masks is not None:
-                    dist_entropy.append((action_dist.entropy() * active_masks) / active_masks.sum())
+                    dist_entropy.append(action_dist.entropy() * active_masks)
                 else:
-                    dist_entropy.append(action_dist.entropy() / action_log_probs[-1].size(0))
+                    dist_entropy.append(action_dist.entropy())
             action_log_probs = torch.cat(action_log_probs, dim=-1).sum(dim=-1, keepdim=True)
             dist_entropy = torch.cat(dist_entropy, dim=-1).sum(dim=-1, keepdim=True)
 
@@ -141,17 +148,17 @@ class ACTLayer(nn.Module):
                 action_dist = action_out(x)
                 action_log_probs.append(action_dist.log_probs(act.unsqueeze(-1)))
                 if active_masks is not None:
-                    dist_entropy.append((action_dist.entropy() * active_masks) / active_masks.sum())
+                    dist_entropy.append(action_dist.entropy() * active_masks)
                 else:
-                    dist_entropy.append(action_dist.entropy() / action_log_probs[-1].size(0))
+                    dist_entropy.append(action_dist.entropy())
 
             # shoot action
             shoot_action_dist = self.action_outs[-1](x, **kwargs)
             action_log_probs.append(shoot_action_dist.log_probs(shoot_action))
             if active_masks is not None:
-                dist_entropy.append((shoot_action_dist.entropy() * active_masks) / active_masks.sum())
+                dist_entropy.append(shoot_action_dist.entropy() * active_masks)
             else:
-                dist_entropy.append(shoot_action_dist.entropy() / action_log_probs[-1].size(0))
+                dist_entropy.append(shoot_action_dist.entropy())
 
             action_log_probs = torch.cat(action_log_probs, dim=-1).sum(dim=-1, keepdim=True)
             dist_entropy = torch.cat(dist_entropy, dim=-1).sum(dim=-1, keepdim=True)
@@ -160,9 +167,9 @@ class ACTLayer(nn.Module):
             action_dist = self.action_out(x)
             action_log_probs = action_dist.log_probs(action)
             if active_masks is not None:
-                dist_entropy = (action_dist.entropy() * active_masks) / active_masks.sum()
+                dist_entropy = action_dist.entropy() * active_masks
             else:
-                dist_entropy = action_dist.entropy() / action_log_probs.size(0)
+                dist_entropy = action_dist.entropy()
         return action_log_probs, dist_entropy
 
     def get_probs(self, x):

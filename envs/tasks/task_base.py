@@ -19,8 +19,15 @@ class BaseTask(ABC):
         self.termination_conditions = []
         self.num_observation = getattr(self.config, 'num_observation', 12)
         self.num_actions = getattr(self.config, 'num_actions', 5)
+        self.use_privileged_critic = bool(
+            getattr(self.config, 'use_privileged_critic', False)
+        )
+        self.num_critic_observation = int(getattr(
+            self.config, 'num_critic_observation', self.num_observation
+        ))
 
         self.load_observation_space()
+        self.load_critic_observation_space()
         self.load_action_space()
         
         if random_seed is not None:
@@ -41,6 +48,17 @@ class BaseTask(ABC):
         self.action_space = gym.spaces.Box(low=-np.inf,
                                            high=np.inf,
                                            shape=(self.num_actions, ))
+
+    def load_critic_observation_space(self):
+        self.critic_observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(self.num_critic_observation,),
+        )
+
+    def get_critic_obs(self, env):
+        """Return privileged critic input, or policy observations by default."""
+        return self.get_obs(env)
     
     def seed(self, random_seed):
         torch.manual_seed(random_seed)

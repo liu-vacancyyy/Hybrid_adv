@@ -1,0 +1,25 @@
+# Point-to-point standard_vtol mission ending in an airborne hover.
+# Unspecified dynamics, safety, observation and PPO-facing parameters inherit
+# from the ground-to-ground mission so the two scenarios stay comparable.
+extends: gazebo_vtol_mission
+
+mission_terminal_mode: hover
+mission_landing_hover_altitude: 10.0
+mission_descent_capture_altitude: 12.0
+
+# A terminal hover must remain stable continuously for three seconds at 50 Hz.
+mission_hover_radius: 3.0
+mission_hover_altitude_tolerance: 1.0
+mission_hover_max_horizontal_speed: 1.0
+mission_hover_max_vertical_speed: 0.5
+mission_hover_max_tilt_deg: 12.0
+mission_hover_hold_steps: 150
+mission_w_hover_stable: 1.0
+
+# The longer horizon leaves time to brake, capture the target and hold for 3 s.
+max_steps: 4500
+
+# PPO keeps real authority in the terminal phase through bounded residuals
+# around the deterministic position/attitude hover controller.
+mission_hover_rl_collective_residual_scale: 0.05
+mission_hover_rl_differential_residual_scale: 0.03

@@ -21,7 +21,14 @@ class PPOTrainer():
         self.use_max_grad_norm = args.use_max_grad_norm
         self.max_grad_norm = args.max_grad_norm
         self.target_kl = float(getattr(args, 'target_kl', 0.0))
-        self.max_log_ratio = float(getattr(args, 'max_log_ratio', 20.0))
+        # A sampled-action ratio can contain a single extreme tail value when
+        # the environment clips or gates a continuous action.  Keeping the
+        # exponentiation bounded protects the surrogate and its gradients;
+        # the trust-region check below uses an independently clipped log ratio.
+        self.max_log_ratio = min(
+            max(float(getattr(args, 'max_log_ratio', 4.0)), 1.0),
+            5.0,
+        )
         self.use_safety_aux = bool(getattr(args, 'use_safety_aux', False))
         self.safety_aux_loss_coef = float(getattr(args, 'safety_aux_loss_coef', 0.1))
         self.safety_aux_pos_weight = float(getattr(args, 'safety_aux_pos_weight', 5.0))
@@ -33,6 +40,9 @@ class PPOTrainer():
         self.cost_lagrange = max(0.0, float(getattr(args, 'cost_lagrange_init', 1.0)))
         self.cost_lagrange_lr = float(getattr(args, 'cost_lagrange_lr', 0.05))
         self.cost_value_loss_coef = float(getattr(args, 'cost_value_loss_coef', 0.25))
+        self.use_privileged_critic = bool(
+            getattr(args, 'use_privileged_critic', False)
+        )
         # rnn configs
         self.use_recurrent_policy = args.use_recurrent_policy
         self.data_chunk_length = args.data_chunk_length
@@ -52,9 +62,18 @@ class PPOTrainer():
 
     def ppo_update(self, policy: PPOPolicy, sample):
 
-        obs_batch, actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
-            returns_batch, value_preds_batch, rnn_states_actor_batch, rnn_states_critic_batch = sample[:9]
-        cursor = 9
+        cursor = 0
+        obs_batch = sample[cursor]
+        cursor += 1
+        if self.use_privileged_critic:
+            critic_obs_batch = sample[cursor]
+            cursor += 1
+        else:
+            critic_obs_batch = obs_batch
+        actions_batch, masks_batch, old_action_log_probs_batch, advantages_batch, \
+            returns_batch, value_preds_batch, rnn_states_actor_batch, \
+            rnn_states_critic_batch = sample[cursor:cursor + 8]
+        cursor += 8
 
         cost_advantages_batch = None
         cost_returns_batch = None
@@ -71,6 +90,7 @@ class PPOTrainer():
             safety_targets_batch, safety_valid_batch = sample[cursor:cursor + 2]
 
         obs_check = check(obs_batch).to(**self.tpdv)
+        critic_obs_check = check(critic_obs_batch).to(**self.tpdv)
         actions_check = check(actions_batch).to(**self.tpdv)
         masks_check = check(masks_batch).to(**self.tpdv)
         old_action_log_probs_batch = check(old_action_log_probs_batch).to(**self.tpdv)
@@ -78,7 +98,8 @@ class PPOTrainer():
         returns_batch = check(returns_batch).to(**self.tpdv)
         value_preds_batch = check(value_preds_batch).to(**self.tpdv)
         if not self._finite_tensors(
-                obs_check, actions_check, masks_check, old_action_log_probs_batch,
+                obs_check, critic_obs_check, actions_check, masks_check,
+                old_action_log_probs_batch,
                 advantages_batch, returns_batch, value_preds_batch):
             return self._zero_update()
 
@@ -89,15 +110,23 @@ class PPOTrainer():
             rnn_states_critic_batch,
             actions_check,
             masks_check,
+            critic_obs=critic_obs_check,
         )
         if not self._finite_tensors(values, action_log_probs, dist_entropy):
             return self._zero_update()
 
         log_ratio = action_log_probs - old_action_log_probs_batch
-        safe_log_ratio = torch.clamp(log_ratio, -self.max_log_ratio, self.max_log_ratio)
-        approx_kl = (
-            (torch.exp(safe_log_ratio.detach()) - 1.0) - safe_log_ratio.detach()
-        ).mean()
+        if not torch.isfinite(log_ratio).all().item():
+            return self._zero_update()
+        safe_log_ratio = torch.clamp(
+            log_ratio, -self.max_log_ratio, self.max_log_ratio
+        )
+        # The usual exp(log_ratio) estimator is dominated by a few clipped
+        # actions and can report millions of KL even when the policy update is
+        # modest.  A bounded squared-log estimator is monotonic, finite, and
+        # suitable for the early-stop guard on sampled continuous actions.
+        kl_log_ratio = torch.clamp(safe_log_ratio.detach(), -2.0, 2.0)
+        approx_kl = 0.5 * kl_log_ratio.square().mean()
         if self.target_kl > 0.0 and approx_kl.detach().item() > 1.5 * self.target_kl:
             ratio_for_log = torch.exp(safe_log_ratio.detach()).mean()
             return (
@@ -141,7 +170,7 @@ class PPOTrainer():
             cost_returns_batch = check(cost_returns_batch).to(**self.tpdv)
             cost_value_preds_batch = check(cost_value_preds_batch).to(**self.tpdv)
             cost_values = policy.evaluate_cost_values(
-                obs_check,
+                critic_obs_check,
                 rnn_states_cost_critic_batch,
                 masks_check,
             )
@@ -279,11 +308,20 @@ class PPOTrainer():
         train_info['safety_aux_acc'] = 0
         train_info['safety_aux_pos_rate'] = 0
         train_info['safety_aux_valid_rate'] = 0
-        rollout_episode_cost = self._rollout_episode_cost(buffer)
-        train_info['constraint/episode_cost'] = rollout_episode_cost
-        train_info['constraint/cost_limit'] = self.cost_limit
-        train_info['constraint/lagrange_before_update'] = self.cost_lagrange
+        rollout_episode_cost = 0.0
+        if self.use_cost_constraints:
+            rollout_episode_cost = self._rollout_episode_cost(buffer)
+            train_info['constraint/episode_cost'] = rollout_episode_cost
+            train_info['constraint/cost_limit'] = self.cost_limit
+            train_info['constraint/lagrange_before_update'] = self.cost_lagrange
 
+        # A rollout is one on-policy data set.  Once the policy has moved past
+        # the KL trust region, continuing to iterate over later minibatches
+        # compounds the drift and makes the stored ratios stale.  Stop the
+        # remainder of this rollout update instead of repeatedly skipping
+        # individual minibatches.
+        attempted_updates = 0
+        stop_due_to_kl = False
         for _ in range(self.ppo_epoch):
             if self.use_recurrent_policy:
                 data_generator = ReplayBuffer.recurrent_generator(buffer, self.num_mini_batch, self.data_chunk_length)
@@ -296,6 +334,7 @@ class PPOTrainer():
                     cost_policy_loss, cost_value_loss, ratio, \
                     actor_grad_norm, critic_grad_norm, approx_kl, skipped, \
                     safety_aux_acc, safety_aux_pos_rate, safety_aux_valid_rate = self.ppo_update(policy, sample)
+                attempted_updates += 1
 
                 train_info['value_loss'] += value_loss.item()
                 train_info['policy_loss'] += policy_loss.item()
@@ -312,7 +351,16 @@ class PPOTrainer():
                 train_info['safety_aux_pos_rate'] += safety_aux_pos_rate
                 train_info['safety_aux_valid_rate'] += safety_aux_valid_rate
 
-        num_updates = self.ppo_epoch * self.num_mini_batch
+                if skipped > 0.0:
+                    stop_due_to_kl = True
+                    break
+            if stop_due_to_kl:
+                break
+
+        # If the first minibatch is rejected, still avoid division by zero;
+        # all reported optimization statistics then describe the attempted
+        # minibatches rather than an arbitrary configured count.
+        num_updates = max(attempted_updates, 1)
 
         for k in train_info.keys():
             if k.startswith('constraint/'):
@@ -325,7 +373,7 @@ class PPOTrainer():
                 self.cost_lagrange
                 + self.cost_lagrange_lr * (rollout_episode_cost - self.cost_limit),
             )
-        train_info['constraint/lagrange_after_update'] = self.cost_lagrange
+            train_info['constraint/lagrange_after_update'] = self.cost_lagrange
 
         return train_info
 
@@ -338,7 +386,6 @@ class PPOTrainer():
                 continue
             cost_sum += float(buf.costs.sum())
             completed += float((buf.masks[1:] < 0.5).sum())
-            completed += float((buf.bad_masks[1:] < 0.5).sum())
         if completed <= 0.0:
             return 0.0
         return cost_sum / completed

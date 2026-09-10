@@ -34,8 +34,10 @@ class VTOLMissionTask(BaseTask):
     FIXED_WING = 3
     BACK_TRANSITION = 4
     VERTICAL_LANDING = 5
+    VERTICAL_HOVER = 5
     PHASE_COUNT = 6
     OBSERVATION_SIZE = 45
+    CRITIC_OBSERVATION_SIZE = 64
     PHASE_NAMES = (
         'takeoff',
         'rotor_climb',
@@ -58,6 +60,13 @@ class VTOLMissionTask(BaseTask):
         self.landing_altitude = float(
             getattr(config, 'mission_landing_altitude', 0.095)
         )
+        self.terminal_mode = str(getattr(
+            config, 'mission_terminal_mode', 'landing'
+        )).lower()
+        if self.terminal_mode not in ('landing', 'hover'):
+            raise ValueError("mission_terminal_mode must be 'landing' or 'hover'")
+        if self.terminal_mode == 'hover':
+            self.PHASE_NAMES = self.PHASE_NAMES[:-1] + ('vertical_hover',)
         route_n = self.landing_n - self.start_n
         route_e = self.landing_e - self.start_e
         self.route_length = math.hypot(route_n, route_e)
@@ -84,6 +93,11 @@ class VTOLMissionTask(BaseTask):
         )
         if not 5.0 < self.approach_distance < self.route_length:
             raise ValueError('mission_approach_distance must be inside the route')
+        if not 0.0 < self.descent_capture_radius < self.approach_distance:
+            raise ValueError(
+                'mission_descent_capture_radius must be positive and smaller '
+                'than mission_approach_distance'
+            )
 
         self.transition_speed = float(
             getattr(config, 'mission_transition_complete_speed', 11.0)
@@ -91,9 +105,71 @@ class VTOLMissionTask(BaseTask):
         self.backtransition_speed = float(
             getattr(config, 'mission_backtransition_complete_speed', 6.0)
         )
+        if self.backtransition_speed <= 0.0:
+            raise ValueError('mission_backtransition_complete_speed must be positive')
+        self.backtransition_capture_hold_steps = max(1, int(getattr(
+            config, 'mission_backtransition_capture_hold_steps', 5
+        )))
+        self.backtransition_max_receding_speed = max(0.0, float(getattr(
+            config, 'mission_backtransition_max_receding_speed', 1.0
+        )))
+        self.backtransition_max_vertical_speed = max(0.0, float(getattr(
+            config,
+            'mission_backtransition_max_vertical_speed',
+            getattr(config, 'mission_backtransition_max_sink_speed', 1.5),
+        )))
+        # Backward-compatible alias used by existing diagnostics/tests.
+        self.backtransition_max_sink_speed = self.backtransition_max_vertical_speed
+        self.descent_capture_altitude = float(getattr(
+            config,
+            'mission_descent_capture_altitude',
+            self.landing_hover_altitude + 2.0,
+        ))
+        if self.descent_capture_altitude <= self.landing_altitude:
+            raise ValueError(
+                'mission_descent_capture_altitude must exceed landing altitude'
+            )
+        self.gate_backtransition_pusher = bool(getattr(
+            config, 'mission_gate_backtransition_pusher', True
+        ))
+        self.backtransition_pusher_max_fraction = min(max(float(getattr(
+            config, 'mission_backtransition_pusher_max_fraction', 0.15
+        )), 0.0), 1.0)
+        self.backtransition_surface_action_scale = min(max(float(getattr(
+            config, 'mission_backtransition_surface_action_scale', 0.35
+        )), 0.0), 1.0)
+        self.backtransition_aero_scale = min(max(float(getattr(
+            config, 'mission_backtransition_aero_scale', 0.20)
+        ), 0.0), 1.0)
+        self.rotor_climb_aero_scale = min(max(float(getattr(
+            config, 'mission_rotor_climb_aero_scale', 0.0)
+        ), 0.0), 1.0)
+        self.transition_aero_scale = min(max(float(getattr(
+            config, 'mission_transition_aero_scale', 0.25)
+        ), 0.0), 1.0)
+        self.descent_capture_max_tilt = math.radians(float(getattr(
+            config, 'mission_descent_capture_max_tilt_deg', 25.0
+        )))
+        # Do not hand an unstable attitude to the vertical controller.  Roll
+        # and pitch rates are the axes directly actuated by the lift-rotor
+        # differential; yaw rate is intentionally left out of this gate
+        # because the standard_vtol yaw response is slower and is damped after
+        # capture.
+        self.descent_capture_max_roll_rate = max(float(getattr(
+            config, 'mission_descent_capture_max_roll_rate', 0.75
+        )), 0.0)
+        self.descent_capture_max_pitch_rate = max(float(getattr(
+            config, 'mission_descent_capture_max_pitch_rate', 0.75
+        )), 0.0)
         self.cruise_speed = float(
             getattr(config, 'mission_cruise_speed', 14.0)
         )
+        self.min_cruise_altitude = float(getattr(
+            config, 'mission_min_safe_cruise_altitude', 4.0
+        ))
+        self.max_cross_track = max(float(getattr(
+            config, 'mission_max_cross_track', 50.0
+        )), 1.0)
         self.approach_speed = float(
             getattr(config, 'mission_approach_speed', 5.0)
         )
@@ -167,9 +243,300 @@ class VTOLMissionTask(BaseTask):
         self.gate_vertical_actuators = bool(
             getattr(config, 'mission_gate_vertical_actuators', True)
         )
+        self.gate_fixed_wing_lift_rotors = bool(getattr(
+            config, 'mission_gate_fixed_wing_lift_rotors', True
+        ))
+        self.fixed_wing_lift_action = min(max(float(getattr(
+            config, 'mission_fixed_wing_lift_action', -0.25
+        )), -1.0), 1.0)
+        self.fixed_wing_lift_recovery_action = min(max(float(getattr(
+            config, 'mission_fixed_wing_lift_recovery_action', 0.05
+        )), -1.0), 1.0)
+        self.fixed_wing_lift_recovery_altitude = max(float(getattr(
+            config, 'mission_fixed_wing_lift_recovery_altitude', 15.0
+        )), self.landing_altitude + 1.0)
+        self.fixed_wing_lift_low_speed_action = min(max(float(getattr(
+            config, 'mission_fixed_wing_lift_low_speed_action', -0.05
+        )), -1.0), 1.0)
+        self.fixed_wing_lift_speed_start = max(float(getattr(
+            config, 'mission_fixed_wing_lift_speed_start', self.transition_speed
+        )), 0.0)
+        self.fixed_wing_lift_speed_end = max(float(getattr(
+            config, 'mission_fixed_wing_lift_speed_end', self.cruise_speed + 4.0
+        )), self.fixed_wing_lift_speed_start + 1e-3)
+        # Initialize the cruise ceiling before deriving its low-altitude
+        # recovery value.  This keeps the two configuration parameters
+        # consistent regardless of object construction order.
+        self.fixed_wing_pusher_max_action = min(max(float(getattr(
+            config, 'mission_fixed_wing_pusher_max_action', -0.50
+        )), -1.0), 1.0)
+        self.fixed_wing_pusher_recovery_action = min(max(float(getattr(
+            config, 'mission_fixed_wing_pusher_recovery_action', -0.90
+        )), -1.0), self.fixed_wing_pusher_max_action)
+        self.fixed_wing_pusher_recovery_altitude = max(float(getattr(
+            config, 'mission_fixed_wing_pusher_recovery_altitude', 10.0
+        )), self.min_cruise_altitude)
+        self.fixed_wing_stabilizer_enable = bool(getattr(
+            config, 'mission_fixed_wing_stabilizer_enable', True
+        ))
+        self.fixed_wing_stabilizer_start = math.radians(float(getattr(
+            config, 'mission_fixed_wing_stabilizer_start_deg', 15.0
+        )))
+        self.fixed_wing_stabilizer_full = max(
+            math.radians(float(getattr(
+                config, 'mission_fixed_wing_stabilizer_full_deg', 35.0
+            ))),
+            self.fixed_wing_stabilizer_start + 1e-3,
+        )
+        self.fixed_wing_stabilizer_roll_gain = float(getattr(
+            config, 'mission_fixed_wing_stabilizer_roll_gain', 0.90
+        ))
+        self.fixed_wing_stabilizer_roll_rate_gain = float(getattr(
+            config, 'mission_fixed_wing_stabilizer_roll_rate_gain', 0.08
+        ))
+        self.fixed_wing_stabilizer_pitch_gain = float(getattr(
+            config, 'mission_fixed_wing_stabilizer_pitch_gain', 0.70
+        ))
+        self.fixed_wing_stabilizer_pitch_rate_gain = float(getattr(
+            config, 'mission_fixed_wing_stabilizer_pitch_rate_gain', 0.08
+        ))
+        self.fixed_wing_stabilizer_diff_limit = min(max(float(getattr(
+            config, 'mission_fixed_wing_stabilizer_diff_limit', 0.45
+        )), 0.0), 1.0)
+        self.fixed_wing_stabilizer_common_limit = min(max(float(getattr(
+            config, 'mission_fixed_wing_stabilizer_common_limit', 0.35
+        )), 0.0), 1.0)
+        self.fixed_wing_nav_enable = bool(getattr(
+            config, 'mission_fixed_wing_nav_enable', True
+        ))
+        self.fixed_wing_nav_heading_gain = max(float(getattr(
+            config, 'mission_fixed_wing_nav_heading_gain', 1.10
+        )), 0.0)
+        self.fixed_wing_nav_cross_track_gain = max(float(getattr(
+            config, 'mission_fixed_wing_nav_cross_track_gain', 0.055
+        )), 0.0)
+        self.fixed_wing_nav_lookahead = max(float(getattr(
+            config, 'mission_fixed_wing_nav_lookahead', 25.0
+        )), 1.0)
+        self.fixed_wing_nav_roll_limit = math.radians(float(getattr(
+            config, 'mission_fixed_wing_nav_roll_limit_deg', 22.0
+        )))
+        self.backtransition_nav_enable = bool(getattr(
+            config, 'mission_backtransition_nav_enable', True
+        ))
+        self.backtransition_nav_heading_gain = max(float(getattr(
+            config, 'mission_backtransition_nav_heading_gain',
+            self.fixed_wing_nav_heading_gain,
+        )), 0.0)
+        self.backtransition_nav_cross_track_gain = max(float(getattr(
+            config, 'mission_backtransition_nav_cross_track_gain',
+            self.fixed_wing_nav_cross_track_gain,
+        )), 0.0)
+        self.backtransition_nav_lookahead = max(float(getattr(
+            config, 'mission_backtransition_nav_lookahead', 35.0
+        )), 1.0)
+        self.backtransition_nav_roll_limit = math.radians(float(getattr(
+            config, 'mission_backtransition_nav_roll_limit_deg', 18.0
+        )))
+        self.backtransition_nav_diff_limit = min(max(float(getattr(
+            config, 'mission_backtransition_nav_diff_limit',
+            self.backtransition_surface_action_scale,
+        )), 0.0), 1.0)
+        self.backtransition_stabilizer_enable = bool(getattr(
+            config, 'mission_backtransition_stabilizer_enable', True
+        ))
+        self.backtransition_stabilizer_start = math.radians(float(getattr(
+            config, 'mission_backtransition_stabilizer_start_deg', 12.0
+        )))
+        self.backtransition_stabilizer_full = max(
+            math.radians(float(getattr(
+                config, 'mission_backtransition_stabilizer_full_deg', 32.0
+            ))),
+            self.backtransition_stabilizer_start + 1e-3,
+        )
+        self.backtransition_stabilizer_roll_gain = float(getattr(
+            config, 'mission_backtransition_stabilizer_roll_gain', 0.28
+        ))
+        self.backtransition_stabilizer_roll_rate_gain = float(getattr(
+            config, 'mission_backtransition_stabilizer_roll_rate_gain', 0.04
+        ))
+        self.backtransition_stabilizer_pitch_gain = float(getattr(
+            config, 'mission_backtransition_stabilizer_pitch_gain', 0.24
+        ))
+        self.backtransition_stabilizer_pitch_rate_gain = float(getattr(
+            config, 'mission_backtransition_stabilizer_pitch_rate_gain', 0.04
+        ))
+        self.backtransition_stabilizer_diff_limit = min(max(float(getattr(
+            config, 'mission_backtransition_stabilizer_diff_limit', 0.12
+        )), 0.0), 1.0)
+        self.backtransition_stabilizer_common_limit = min(max(float(getattr(
+            config, 'mission_backtransition_stabilizer_common_limit', 0.12
+        )), 0.0), 1.0)
+        self.aero_envelope_min_forward_speed = max(float(
+            getattr(
+                config,
+                'mission_aero_envelope_min_forward_speed',
+                getattr(config, 'mission_aero_envelope_min_speed', 4.0),
+            )
+        ), 0.0)
+        self.transition_aero_envelope_min_forward_speed = max(float(
+            getattr(
+                config,
+                'mission_transition_aero_envelope_min_forward_speed',
+                self.transition_speed,
+            )
+        ), self.aero_envelope_min_forward_speed)
+        self.fixed_wing_aero_grace_steps = max(0, int(getattr(
+            config, 'mission_fixed_wing_aero_grace_steps', 25
+        )))
+        self.vertical_lift_differential_scale = float(getattr(
+            config, 'mission_vertical_lift_differential_scale', 0.1
+        ))
+        if not 0.0 <= self.vertical_lift_differential_scale <= 1.0:
+            raise ValueError(
+                'mission_vertical_lift_differential_scale must be between 0 and 1'
+            )
+        self.rotor_climb_lift_differential_scale = min(max(float(getattr(
+            config, 'mission_rotor_climb_lift_differential_scale', 0.0
+        )), 0.0), 1.0)
+        self.rotor_climb_pusher_enable_altitude = max(float(getattr(
+            config, 'mission_rotor_climb_pusher_enable_altitude', 10.0
+        )), self.takeoff_clearance)
+        self.ground_lift_differential_scale = min(max(float(getattr(
+            config, 'mission_ground_lift_differential_scale', 0.0)
+        ), 0.0), 1.0)
+        self.rotor_climb_pusher_min_action = min(max(float(getattr(
+            config, 'mission_rotor_climb_pusher_min_action', -0.2
+        )), -1.0), 1.0)
+        self.rotor_climb_pusher_max_action = min(max(float(getattr(
+            config, 'mission_rotor_climb_pusher_max_action', -0.50
+        )), -1.0), 1.0)
+        if self.rotor_climb_pusher_max_action < self.rotor_climb_pusher_min_action:
+            raise ValueError(
+                'mission_rotor_climb_pusher_max_action must be at least '
+                'mission_rotor_climb_pusher_min_action'
+            )
+        self.rotor_climb_pusher_roll_trim_scale = max(float(getattr(
+            config, 'mission_rotor_climb_pusher_roll_trim_scale', 0.01
+        )), 0.0)
+        self.transition_pusher_max_action = min(max(float(getattr(
+            config, 'mission_transition_pusher_max_action', -0.25
+        )), -1.0), 1.0)
+        self.transition_pusher_speed_limit = max(float(getattr(
+            config, 'mission_transition_pusher_speed_limit', 18.0
+        )), self.transition_speed + 1e-6)
+        self.transition_pusher_high_speed_action = min(max(float(getattr(
+            config, 'mission_transition_pusher_high_speed_action', -0.65
+        )), -1.0), self.transition_pusher_max_action)
+        self.backtransition_lift_action_high = min(max(float(getattr(
+            config, 'mission_backtransition_lift_action_high',
+            self.fixed_wing_lift_action,
+        )), -1.0), 1.0)
+        self.backtransition_lift_action_low = min(max(float(getattr(
+            config, 'mission_backtransition_lift_action_low',
+            self.fixed_wing_lift_recovery_action,
+        )), -1.0), 1.0)
+        self.backtransition_altitude_gain = max(float(getattr(
+            config, 'mission_backtransition_altitude_gain', 0.06
+        )), 0.0)
+        self.backtransition_velocity_gain = max(float(getattr(
+            config, 'mission_backtransition_velocity_gain', 0.16
+        )), 0.0)
+        self.backtransition_target_sink_speed = max(float(getattr(
+            config, 'mission_backtransition_target_sink_speed', 0.80
+        )), 0.0)
+        self.backtransition_extra_drag_coefficient = max(float(getattr(
+            config, 'mission_backtransition_extra_drag_coefficient', 0.0
+        )), 0.0)
+        self.backtransition_extra_drag_start_distance = max(float(getattr(
+            config,
+            'mission_backtransition_extra_drag_start_distance',
+            self.approach_distance,
+        )), self.descent_capture_radius)
+        self.vertical_landing_altitude_gain = max(float(getattr(
+            config, 'mission_vertical_landing_altitude_gain', 0.01
+        )), 0.0)
+        self.vertical_landing_velocity_gain = max(float(getattr(
+            config, 'mission_vertical_landing_velocity_gain', 0.12
+        )), 0.0)
+        self.vertical_landing_collective_limit = min(max(float(getattr(
+            config, 'mission_vertical_landing_collective_limit', 0.20
+        )), 0.0), 1.0)
+        self.vertical_landing_target_sink_speed = max(float(getattr(
+            config, 'mission_vertical_landing_target_sink_speed', 0.50
+        )), 0.0)
+        self.vertical_landing_position_gain = max(float(getattr(
+            config, 'mission_vertical_landing_position_gain', 0.08
+        )), 0.0)
+        self.vertical_landing_horizontal_damping = max(float(getattr(
+            config, 'mission_vertical_landing_horizontal_damping', 0.45
+        )), 0.0)
+        self.vertical_landing_max_accel = max(float(getattr(
+            config, 'mission_vertical_landing_max_accel', 2.5
+        )), 0.0)
+        self.vertical_landing_max_tilt = math.radians(float(getattr(
+            config, 'mission_vertical_landing_max_tilt_deg', 18.0
+        )))
+        self.vertical_landing_lift_differential_scale = min(max(float(getattr(
+            config, 'mission_vertical_landing_lift_differential_scale', 0.24
+        )), 0.0), 1.0)
+        self.vertical_landing_roll_gain = max(float(getattr(
+            config, 'mission_vertical_landing_roll_gain', 0.70
+        )), 0.0)
+        self.vertical_landing_pitch_gain = max(float(getattr(
+            config, 'mission_vertical_landing_pitch_gain', 0.70
+        )), 0.0)
+        self.vertical_landing_roll_rate_gain = max(float(getattr(
+            config, 'mission_vertical_landing_roll_rate_gain', 0.16
+        )), 0.0)
+        self.vertical_landing_pitch_rate_gain = max(float(getattr(
+            config, 'mission_vertical_landing_pitch_rate_gain', 0.16
+        )), 0.0)
+        self.vertical_landing_diff_limit = min(max(float(getattr(
+            config, 'mission_vertical_landing_diff_limit', 0.06
+        )), 0.0), 1.0)
+        self.vertical_landing_yaw_rate_gain = max(float(getattr(
+            config, 'mission_vertical_landing_yaw_rate_gain', 0.035
+        )), 0.0)
+        self.vertical_landing_yaw_diff_limit = min(max(float(getattr(
+            config, 'mission_vertical_landing_yaw_diff_limit', 0.04
+        )), 0.0), 1.0)
+        self.hover_radius = max(float(getattr(
+            config, 'mission_hover_radius', 3.0
+        )), 0.0)
+        self.hover_altitude_tolerance = max(float(getattr(
+            config, 'mission_hover_altitude_tolerance', 1.0
+        )), 0.0)
+        self.hover_max_horizontal_speed = max(float(getattr(
+            config, 'mission_hover_max_horizontal_speed', 1.0
+        )), 0.0)
+        self.hover_max_vertical_speed = max(float(getattr(
+            config, 'mission_hover_max_vertical_speed', 0.5
+        )), 0.0)
+        self.hover_max_tilt = math.radians(float(getattr(
+            config, 'mission_hover_max_tilt_deg', 12.0
+        )))
+        self.hover_hold_steps = max(1, int(getattr(
+            config, 'mission_hover_hold_steps', 150
+        )))
+        self.hover_rl_collective_residual_scale = min(max(float(getattr(
+            config, 'mission_hover_rl_collective_residual_scale', 0.0
+        )), 0.0), 1.0)
+        self.hover_rl_differential_residual_scale = min(max(float(getattr(
+            config, 'mission_hover_rl_differential_residual_scale', 0.0
+        )), 0.0), 1.0)
 
         self.phase = torch.zeros(self.n, dtype=torch.long, device=self.device)
         self.phase_entry_step = torch.zeros_like(self.phase)
+        self.backtransition_capture_count = torch.zeros_like(self.phase)
+        # ``update_before_observation`` may be called more than once while
+        # assembling diagnostics.  Keep the hold counter tied to control
+        # steps, rather than to callback invocations.
+        self.backtransition_capture_last_step = torch.full_like(
+            self.phase, -1
+        )
+        self.hover_stable_count = torch.zeros_like(self.phase)
+        self.hover_stable_last_step = torch.full_like(self.phase, -1)
         self.phase_advanced = torch.zeros(
             self.n, dtype=torch.bool, device=self.device
         )
@@ -185,6 +552,12 @@ class VTOLMissionTask(BaseTask):
         self.metric_gps_age = torch.zeros(self.n, device=self.device)
         self.training_success_count = torch.zeros((), device=self.device)
         self.training_failure_count = torch.zeros((), device=self.device)
+        self.rollout_metrics_active = False
+        self.rollout_episode_opportunities = torch.zeros((), device=self.device)
+        self.rollout_phase_reach_count = torch.zeros(
+            self.PHASE_COUNT, device=self.device
+        )
+        self._env_ref = None
 
         if self.num_observation != self.OBSERVATION_SIZE:
             self.num_observation = self.OBSERVATION_SIZE
@@ -192,6 +565,12 @@ class VTOLMissionTask(BaseTask):
         if self.num_actions != 8:
             self.num_actions = 8
             self.load_action_space()
+        self.use_privileged_critic = bool(
+            getattr(config, 'use_privileged_critic', True)
+        )
+        self.num_critic_observation = self.CRITIC_OBSERVATION_SIZE
+        self.load_critic_observation_space()
+        self.constraint_penalty = torch.zeros(self.n, device=self.device)
 
         self.reward_functions = [
             VTOLMissionReward(config),
@@ -220,6 +599,7 @@ class VTOLMissionTask(BaseTask):
         )
 
     def reset(self, env):
+        self._env_ref = env
         reset = (
             env.is_done.bool()
             | env.bad_done.bool()
@@ -235,10 +615,31 @@ class VTOLMissionTask(BaseTask):
         self.phase[reset] = sampled_phase
         self.start_phase[reset] = sampled_phase
         self.phase_entry_step[reset] = 0
+        self.backtransition_capture_count[reset] = 0
+        self.backtransition_capture_last_step[reset] = -1
+        self.hover_stable_count[reset] = 0
+        self.hover_stable_last_step[reset] = -1
         self.phase_advanced[reset] = False
+        self.constraint_penalty[reset] = 0.0
         self._initialize_curriculum_states(env, reset)
         self._refresh_guidance()
         self.previous_waypoint_distance[reset] = self._waypoint_distance(env)[reset]
+        if self.rollout_metrics_active:
+            self.rollout_episode_opportunities += count
+            for phase_id in range(1, self.PHASE_COUNT):
+                self.rollout_phase_reach_count[phase_id] += (
+                    sampled_phase >= phase_id
+                ).sum()
+
+    def begin_training_rollout(self):
+        """Start GPU-side phase reach accounting for one PPO rollout."""
+        self.rollout_metrics_active = True
+        self.rollout_episode_opportunities.fill_(self.n)
+        self.rollout_phase_reach_count.zero_()
+        for phase_id in range(1, self.PHASE_COUNT):
+            self.rollout_phase_reach_count[phase_id] = (
+                self.phase >= phase_id
+            ).sum()
 
     def _initialize_curriculum_states(self, env, reset):
         model = env.model
@@ -327,13 +728,22 @@ class VTOLMissionTask(BaseTask):
 
         model.sync_reset_state(reset)
 
-    def _refresh_guidance(self):
+    def _refresh_guidance(self, env=None):
+        if env is None:
+            env = self._env_ref
+        if env is None:
+            raise RuntimeError('VTOLMissionTask guidance requires an environment')
         approach_n = self.landing_n - self.route_unit_n * self.approach_distance
         approach_e = self.landing_e - self.route_unit_e * self.approach_distance
 
         self.target_npos[:] = self.landing_n
         self.target_epos[:] = self.landing_e
-        self.target_altitude[:] = self.landing_altitude
+        terminal_altitude = (
+            self.landing_hover_altitude
+            if self.terminal_mode == 'hover'
+            else self.landing_altitude
+        )
+        self.target_altitude[:] = terminal_altitude
         self.target_heading[:] = self.final_heading
         self.target_speed[:] = 0.0
 
@@ -353,20 +763,83 @@ class VTOLMissionTask(BaseTask):
         self.target_speed[self.phase == self.FIXED_WING] = self.cruise_speed
 
         backtransition = self.phase == self.BACK_TRANSITION
-        self.target_altitude[backtransition] = self.landing_hover_altitude
-        self.target_heading[backtransition] = self.route_heading
-        self.target_speed[backtransition] = self.approach_speed
+        if torch.any(backtransition):
+            # Do not command an immediate drop from cruise altitude as soon as
+            # reverse transition starts.  The aircraft has up to
+            # ``approach_distance`` metres to brake, so descend on a smooth
+            # corridor and reach hover altitude only at the capture boundary.
+            npos, epos, _ = env.model.get_position()
+            distance = torch.sqrt(
+                (npos - self.landing_n) ** 2
+                + (epos - self.landing_e) ** 2
+            )
+            fraction = (
+                (distance - self.descent_capture_radius)
+                / (self.approach_distance - self.descent_capture_radius)
+            ).clamp(0.0, 1.0)
+            self.target_altitude[backtransition] = (
+                self.landing_hover_altitude
+                + fraction[backtransition]
+                * (self.cruise_altitude - self.landing_hover_altitude)
+            )
+            self.target_heading[backtransition] = self.route_heading
+            self.target_speed[backtransition] = self.approach_speed
 
     def update_before_observation(self, env):
+        self._env_ref = env
         self.phase_advanced.zero_()
         phase_before = self.phase.clone()
         elapsed = env.step_count - self.phase_entry_step
         dwell_ok = elapsed >= self.phase_min_steps[self.phase]
         npos, epos, altitude = env.model.get_position()
         speed = env.model.get_TAS()
+        vel_n, vel_e, vel_up = env.model.get_world_velocity()
+        horizontal_speed = torch.sqrt(
+            (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
+        )
         contact = env.model.get_ground_contact_state()
+        roll, pitch, _ = env.model.get_posture()
         distance_to_landing = torch.sqrt(
             (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+        )
+        landing_dn = self.landing_n - npos
+        landing_de = self.landing_e - epos
+        p, q, _ = env.model.get_angular_velocity()
+        closing_speed = (
+            vel_n * landing_dn + vel_e * landing_de
+        ) / distance_to_landing.clamp_min(1e-6)
+
+        # Require the aircraft to remain inside the capture envelope for a few
+        # control cycles.  This prevents a single threshold crossing from
+        # switching to vertical mode while the aircraft is still flying away.
+        capture_candidate = (
+            (distance_to_landing <= self.descent_capture_radius)
+            & (altitude <= self.descent_capture_altitude)
+            & (horizontal_speed <= self.backtransition_speed)
+            & (closing_speed >= -self.backtransition_max_receding_speed)
+            & (vel_up.abs() <= self.backtransition_max_vertical_speed)
+            & (roll.abs() <= self.descent_capture_max_tilt)
+            & (pitch.abs() <= self.descent_capture_max_tilt)
+            & (p.abs() <= self.descent_capture_max_roll_rate)
+            & (q.abs() <= self.descent_capture_max_pitch_rate)
+        )
+        in_backtransition = phase_before == self.BACK_TRANSITION
+        new_control_step = (
+            (env.step_count > 0)
+            & (env.step_count != self.backtransition_capture_last_step)
+        )
+        self.backtransition_capture_count = torch.where(
+            in_backtransition & new_control_step & capture_candidate,
+            self.backtransition_capture_count + 1,
+            torch.where(
+                in_backtransition & new_control_step,
+                torch.zeros_like(self.backtransition_capture_count),
+                self.backtransition_capture_count,
+            ),
+        )
+        self.backtransition_capture_last_step.copy_(env.step_count)
+        capture_ready = self.backtransition_capture_count >= (
+            self.backtransition_capture_hold_steps
         )
 
         conditions = (
@@ -374,29 +847,764 @@ class VTOLMissionTask(BaseTask):
             altitude >= self.cruise_altitude - 1.5,
             (speed >= self.transition_speed) & (altitude >= self.cruise_altitude - 4.0),
             distance_to_landing <= self.approach_distance,
-            (distance_to_landing <= self.descent_capture_radius)
-            & (altitude <= self.landing_hover_altitude + 2.0)
-            & (speed <= self.backtransition_speed),
+            capture_ready,
         )
         for phase_id, condition in enumerate(conditions):
             advance = (phase_before == phase_id) & dwell_ok & condition
             self.phase[advance] = phase_id + 1
             self.phase_entry_step[advance] = env.step_count[advance]
             self.phase_advanced |= advance
+            if self.rollout_metrics_active:
+                self.rollout_phase_reach_count[phase_id + 1] += advance.sum()
         self._refresh_guidance()
+        self._update_hover_stability(env)
+
+    def hover_stable_candidate(self, env):
+        """Return environments currently inside the terminal hover envelope."""
+        npos, epos, altitude = env.model.get_position()
+        vel_n, vel_e, vel_up = env.model.get_world_velocity()
+        roll, pitch, _ = env.model.get_posture()
+        contact = env.model.get_ground_contact_state()
+        horizontal_error = torch.sqrt(
+            (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
+        )
+        horizontal_speed = torch.sqrt(
+            (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
+        )
+        return (
+            (self.phase == self.VERTICAL_HOVER)
+            & ~contact['on_ground']
+            & (horizontal_error <= self.hover_radius)
+            & (
+                (altitude - self.landing_hover_altitude).abs()
+                <= self.hover_altitude_tolerance
+            )
+            & (horizontal_speed <= self.hover_max_horizontal_speed)
+            & (vel_up.abs() <= self.hover_max_vertical_speed)
+            & (roll.abs() <= self.hover_max_tilt)
+            & (pitch.abs() <= self.hover_max_tilt)
+        )
+
+    def _update_hover_stability(self, env):
+        if self.terminal_mode != 'hover':
+            return
+        new_control_step = (
+            (env.step_count > 0)
+            & (env.step_count != self.hover_stable_last_step)
+        )
+        stable = self.hover_stable_candidate(env)
+        self.hover_stable_count = torch.where(
+            new_control_step & stable,
+            self.hover_stable_count + 1,
+            torch.where(
+                new_control_step,
+                torch.zeros_like(self.hover_stable_count),
+                self.hover_stable_count,
+            ),
+        )
+        self.hover_stable_last_step.copy_(env.step_count)
 
     def maybe_override_action(self, env, action):
-        if not self.gate_vertical_actuators or action.shape[1] < 8:
+        if action.shape[1] < 8:
             return action
+        if not self.gate_vertical_actuators and not self.gate_backtransition_pusher:
+            # A bounded reverse-transition surface command is still useful
+            # even when the pusher/vertical gates are disabled.
+            if self.backtransition_surface_action_scale >= 1.0:
+                return action
         action = action.clone()
-        vertical = (
-            (self.phase == self.TAKEOFF)
-            | (self.phase == self.ROTOR_CLIMB)
-            | (self.phase == self.VERTICAL_LANDING)
-        )
-        action[vertical, 4] = -1.0
-        action[vertical, 5:8] = 0.0
+        policy_lift_action = action[:, 0:4].clone()
+
+        backtransition = self.phase == self.BACK_TRANSITION
+        fixed_wing = self.phase == self.FIXED_WING
+        if hasattr(env.model, 'aero_force_scale'):
+            transition = self.phase == self.TRANSITION
+            rotor_borne = (
+                (self.phase == self.TAKEOFF)
+                | (self.phase == self.ROTOR_CLIMB)
+            )
+            forward_speed = env.model.s[:, 6].clamp_min(0.0)
+            transition_fraction = (
+                (forward_speed - self.transition_speed)
+                / max(self.cruise_speed - self.transition_speed, 1e-6)
+            ).clamp(0.0, 1.0)
+            transition_scale = self.transition_aero_scale + (
+                1.0 - self.transition_aero_scale
+            ) * transition_fraction
+            scale = torch.ones_like(env.model.aero_force_scale)
+            scale = torch.where(
+                rotor_borne,
+                torch.full_like(scale, self.rotor_climb_aero_scale),
+                scale,
+            )
+            scale = torch.where(transition, transition_scale, scale)
+            scale = torch.where(
+                backtransition,
+                torch.full_like(scale, self.backtransition_aero_scale),
+                scale,
+            )
+            env.model.aero_force_scale[:] = scale
+            if hasattr(env.model.dynamics, 'aero_scale'):
+                env.model.dynamics.aero_scale = env.model.aero_force_scale
+        if self.backtransition_surface_action_scale < 1.0:
+            action[backtransition, 5:8] *= self.backtransition_surface_action_scale
+
+        if self.gate_vertical_actuators:
+            vertical = (
+                (self.phase == self.TAKEOFF)
+                | (self.phase == self.ROTOR_CLIMB)
+                | (self.phase == self.VERTICAL_LANDING)
+            )
+            _, _, altitude = env.model.get_position()
+            lift = action[vertical, 0:4]
+            collective = lift.mean(dim=1, keepdim=True)
+            differential_scale = torch.full_like(altitude, self.vertical_lift_differential_scale)
+            differential_scale = torch.where(
+                self.phase == self.ROTOR_CLIMB,
+                torch.full_like(
+                    differential_scale,
+                    self.rotor_climb_lift_differential_scale,
+                ),
+                differential_scale,
+            )
+            differential_scale = torch.where(
+                (self.phase == self.TAKEOFF)
+                | (self.phase == self.VERTICAL_LANDING),
+                torch.full_like(differential_scale, self.ground_lift_differential_scale),
+                differential_scale,
+            )
+            action[vertical, 0:4] = collective + (
+                differential_scale[vertical].reshape(-1, 1)
+                * (lift - collective)
+            )
+            # Keep the pusher off while close to the ground, then allow it to
+            # build forward speed during the upper part of rotor climb. This
+            # is necessary for the subsequent 11 m/s transition gate while
+            # preserving the no-tip-over takeoff envelope.
+            pusher_off = (
+                (self.phase == self.TAKEOFF)
+                | (self.phase == self.VERTICAL_LANDING)
+                | (
+                    (self.phase == self.ROTOR_CLIMB)
+                    & (altitude < self.rotor_climb_pusher_enable_altitude)
+                )
+            )
+            action[pusher_off, 4] = -1.0
+            pusher_enabled = (
+                (self.phase == self.ROTOR_CLIMB)
+                & (altitude >= self.rotor_climb_pusher_enable_altitude)
+            )
+            action[pusher_enabled, 4] = torch.maximum(
+                action[pusher_enabled, 4],
+                torch.full_like(action[pusher_enabled, 4],
+                                self.rotor_climb_pusher_min_action),
+            )
+            action[pusher_enabled, 4] = torch.minimum(
+                action[pusher_enabled, 4],
+                torch.full_like(action[pusher_enabled, 4],
+                                self.rotor_climb_pusher_max_action),
+            )
+            # The pusher propeller has a reaction torque around body x.  Keep
+            # the lift rotors equal for policy exploration, but add a small
+            # deterministic counter-torque proportional to pusher throttle.
+            pusher_fraction = 0.5 * (action[pusher_enabled, 4] + 1.0)
+            roll_trim = pusher_fraction * self.rotor_climb_pusher_roll_trim_scale
+            trim = torch.stack((roll_trim, -roll_trim, -roll_trim, roll_trim), dim=1)
+            action[pusher_enabled, 0:4] = (
+                action[pusher_enabled, 0:4] + trim
+            ).clamp(-1.0, 1.0)
+            action[vertical, 5:8] = 0.0
+
+            # Vertical landing gets a mass-aware hover feed-forward and a
+            # bounded altitude/vertical-speed correction.  This removes the
+            # need for PPO to discover the absolute hover throttle from a
+            # sparse terminal reward while leaving the other flight phases
+            # policy-controlled.  After contact, unload the rotors gradually
+            # so the contact solver can settle the vehicle without bouncing.
+            terminal_vertical = self.phase == self.VERTICAL_LANDING
+            if torch.any(terminal_vertical):
+                vel_n, vel_e, vel_up = env.model.get_world_velocity()
+                motor_constants = getattr(
+                    env.model.dynamics, 'motor_constant', (2.0e-5,)
+                )
+                motor_constant = float(motor_constants[0])
+                hover_omega = torch.sqrt(
+                    (
+                        env.model.mass_curr * env.model.dynamics.g
+                        / (4.0 * max(motor_constant, 1.0e-8))
+                    ).clamp_min(0.0)
+                )
+                rotor_scale = env.model.motor_cmd_scaling[0]
+                if env.model.action_is_gazebo_control:
+                    hover_action = hover_omega / rotor_scale
+                else:
+                    hover_action = 2.0 * hover_omega / rotor_scale - 1.0
+                target_altitude = (
+                    self.landing_hover_altitude
+                    if self.terminal_mode == 'hover'
+                    else self.landing_altitude
+                )
+                altitude_error = altitude - target_altitude
+                if self.terminal_mode == 'hover':
+                    target_sink = torch.zeros_like(altitude)
+                else:
+                    target_sink = -torch.minimum(
+                        torch.full_like(
+                            altitude, self.vertical_landing_target_sink_speed
+                        ),
+                        0.22 * torch.sqrt(altitude_error.clamp_min(0.0)),
+                    )
+                collective = (
+                    hover_action
+                    - self.vertical_landing_altitude_gain * altitude_error
+                    + self.vertical_landing_velocity_gain * (target_sink - vel_up)
+                )
+                collective = torch.maximum(
+                    collective,
+                    hover_action - self.vertical_landing_collective_limit,
+                )
+                collective = torch.minimum(
+                    collective,
+                    hover_action + self.vertical_landing_collective_limit,
+                )
+                contact_state = env.model.get_ground_contact_state()
+                touchdown_collective = hover_action - min(
+                    self.vertical_landing_collective_limit, 0.10
+                )
+                if self.terminal_mode == 'landing':
+                    collective = torch.where(
+                        contact_state['on_ground'], touchdown_collective, collective
+                    )
+                action[terminal_vertical, 0:4] = collective[
+                    terminal_vertical
+                ].reshape(-1, 1).clamp(-1.0, 1.0)
+
+                # Cascade the landing position controller through an attitude
+                # and angular-rate loop.  The outer loop is expressed in the
+                # world north/east frame; the inner loop must use the current
+                # yaw to rotate that request into body forward/right axes.
+                # This avoids accumulating roll/pitch when the vehicle enters
+                # vertical mode with a non-zero attitude or rate.
+                npos, epos, _ = env.model.get_position()
+                _, _, yaw = env.model.get_posture()
+                roll, pitch, _ = env.model.get_posture()
+                p, q, r = env.model.get_angular_velocity()
+                north_error = self.landing_n - npos
+                east_error = self.landing_e - epos
+                accel_n = (
+                    self.vertical_landing_position_gain * north_error
+                    - self.vertical_landing_horizontal_damping * vel_n
+                )
+                accel_e = (
+                    self.vertical_landing_position_gain * east_error
+                    - self.vertical_landing_horizontal_damping * vel_e
+                )
+                accel_norm = torch.sqrt(accel_n * accel_n + accel_e * accel_e)
+                accel_scale = torch.minimum(
+                    torch.ones_like(accel_norm),
+                    self.vertical_landing_max_accel
+                    / accel_norm.clamp_min(1.0e-6),
+                )
+                accel_n = accel_n * accel_scale
+                accel_e = accel_e * accel_scale
+                # A contact patch should not keep commanding a horizontal
+                # tilt after touchdown.  The attitude loop still damps any
+                # residual roll/pitch on the ground.
+                contact_mask = contact_state['on_ground']
+                accel_n = torch.where(contact_mask, torch.zeros_like(accel_n), accel_n)
+                accel_e = torch.where(contact_mask, torch.zeros_like(accel_e), accel_e)
+                accel_forward = (
+                    torch.cos(yaw) * accel_n + torch.sin(yaw) * accel_e
+                )
+                accel_right = (
+                    -torch.sin(yaw) * accel_n + torch.cos(yaw) * accel_e
+                )
+                desired_pitch = -torch.atan2(
+                    accel_forward, torch.full_like(accel_forward, 9.807)
+                ).clamp(
+                    -self.vertical_landing_max_tilt,
+                    self.vertical_landing_max_tilt,
+                )
+                desired_roll = torch.atan2(
+                    accel_right, torch.full_like(accel_right, 9.807)
+                ).clamp(
+                    -self.vertical_landing_max_tilt,
+                    self.vertical_landing_max_tilt,
+                )
+                pitch_delta = (
+                    self.vertical_landing_pitch_gain * (desired_pitch - pitch)
+                    - self.vertical_landing_pitch_rate_gain * q
+                ).clamp(
+                    -self.vertical_landing_diff_limit,
+                    self.vertical_landing_diff_limit,
+                )
+                roll_delta = (
+                    self.vertical_landing_roll_gain * (desired_roll - roll)
+                    - self.vertical_landing_roll_rate_gain * p
+                ).clamp(
+                    -self.vertical_landing_diff_limit,
+                    self.vertical_landing_diff_limit,
+                )
+                yaw_delta = (
+                    -self.vertical_landing_yaw_rate_gain * r
+                ).clamp(
+                    -self.vertical_landing_yaw_diff_limit,
+                    self.vertical_landing_yaw_diff_limit,
+                )
+                rotor_delta = torch.stack((
+                    pitch_delta - roll_delta + yaw_delta,
+                    -pitch_delta + roll_delta + yaw_delta,
+                    pitch_delta + roll_delta - yaw_delta,
+                    -pitch_delta - roll_delta - yaw_delta,
+                ), dim=1)
+                terminal_action = collective.reshape(-1, 1) + rotor_delta
+                if self.terminal_mode == 'hover':
+                    policy_collective = policy_lift_action.mean(
+                        dim=1, keepdim=True
+                    )
+                    policy_differential = (
+                        policy_lift_action - policy_collective
+                    )
+                    terminal_action = (
+                        terminal_action
+                        + self.hover_rl_collective_residual_scale
+                        * torch.tanh(policy_collective)
+                        + self.hover_rl_differential_residual_scale
+                        * torch.tanh(policy_differential)
+                    )
+                action[terminal_vertical, 0:4] = terminal_action[
+                    terminal_vertical
+                ].clamp(-1.0, 1.0)
+
+        # In wing-borne fixed-wing mode the four lift rotors are stopped; the
+        # pusher and control surfaces remain policy-controlled.  Leaving the
+        # hover rotors at their normalized mean action produces nearly hover
+        # thrust and drives the vehicle through the altitude safety boundary.
+        if self.gate_fixed_wing_lift_rotors:
+            fixed_wing = self.phase == self.FIXED_WING
+            _, _, altitude = env.model.get_position()
+            speed = env.model.get_TAS()
+            speed_fraction = (
+                (speed - self.fixed_wing_lift_speed_start)
+                / (self.fixed_wing_lift_speed_end - self.fixed_wing_lift_speed_start)
+            ).clamp(0.0, 1.0)
+            speed_lift_action = self.fixed_wing_lift_low_speed_action + (
+                speed_fraction * (
+                    self.fixed_wing_lift_action
+                    - self.fixed_wing_lift_low_speed_action
+                )
+            )
+            # A zero-airflow fixed-wing state is only a diagnostic/test setup,
+            # not a valid handover condition.  Preserve the configured cruise
+            # trim there; the low-speed recovery trim applies once the model
+            # actually has forward airspeed.
+            speed_lift_action = torch.where(
+                speed < 0.5,
+                torch.full_like(speed_lift_action, self.fixed_wing_lift_action),
+                speed_lift_action,
+            )
+            recovery_fraction = (
+                (altitude - self.min_cruise_altitude)
+                / (self.fixed_wing_lift_recovery_altitude - self.min_cruise_altitude)
+            ).clamp(0.0, 1.0)
+            lift_action = self.fixed_wing_lift_recovery_action + recovery_fraction * (
+                speed_lift_action
+                - self.fixed_wing_lift_recovery_action
+            )
+            action[fixed_wing, 0:4] = lift_action[fixed_wing].reshape(-1, 1)
+
+        # Keep the wing-borne vehicle inside a recoverable attitude envelope.
+        # The learned surfaces are unchanged near trim; as bank or pitch grows,
+        # blend toward a bounded PD correction before the hard angle termination
+        # is reached.  Positive roll uses positive (left-right) elevon
+        # differential for this model's sign convention.
+        if self.fixed_wing_stabilizer_enable:
+            fixed_wing = self.phase == self.FIXED_WING
+            if torch.any(fixed_wing):
+                roll, pitch, _ = env.model.get_posture()
+                p, q, _ = env.model.get_angular_velocity()
+                attitude_mag = torch.maximum(roll.abs(), pitch.abs())
+                blend = (
+                    (attitude_mag - self.fixed_wing_stabilizer_start)
+                    / (self.fixed_wing_stabilizer_full
+                       - self.fixed_wing_stabilizer_start)
+                ).clamp(0.0, 1.0)
+                roll_trim = (
+                    self.fixed_wing_stabilizer_roll_gain * roll
+                    + self.fixed_wing_stabilizer_roll_rate_gain * p
+                ).clamp(
+                    -self.fixed_wing_stabilizer_diff_limit,
+                    self.fixed_wing_stabilizer_diff_limit,
+                )
+                pitch_trim = (
+                    -self.fixed_wing_stabilizer_pitch_gain * pitch
+                    - self.fixed_wing_stabilizer_pitch_rate_gain * q
+                ).clamp(
+                    -self.fixed_wing_stabilizer_common_limit,
+                    self.fixed_wing_stabilizer_common_limit,
+                )
+                policy_common = 0.5 * (action[:, 5] + action[:, 6])
+                policy_diff = 0.5 * (action[:, 5] - action[:, 6])
+                common = (
+                    (1.0 - blend) * policy_common + blend * pitch_trim
+                ).clamp(-1.0, 1.0)
+                differential = (
+                    (1.0 - blend) * policy_diff + blend * roll_trim
+                ).clamp(-1.0, 1.0)
+                action[fixed_wing, 5] = (
+                    common[fixed_wing] + differential[fixed_wing]
+                ).clamp(-1.0, 1.0)
+                action[fixed_wing, 6] = (
+                    common[fixed_wing] - differential[fixed_wing]
+                ).clamp(-1.0, 1.0)
+                action[fixed_wing, 7] = (
+                    (1.0 - blend[fixed_wing]) * action[fixed_wing, 7]
+                    + blend[fixed_wing] * pitch_trim[fixed_wing]
+                ).clamp(-1.0, 1.0)
+
+        # Add a bounded route-following roll trim in fixed-wing flight. The
+        # learned policy still controls the surfaces inside the normal
+        # corridor; this only supplies the missing lateral restoring signal
+        # when heading/cross-track error is large enough to leave the route.
+        if self.fixed_wing_nav_enable and torch.any(fixed_wing):
+            npos, epos, _ = env.model.get_position()
+            _, _, heading = env.model.get_posture()
+            cross_track = (
+                -(npos - self.start_n) * self.route_unit_e
+                + (epos - self.start_e) * self.route_unit_n
+            )
+            heading_error = wrap_PI(self.route_heading - heading)
+            # The standard_vtol elevon convention produces a negative roll
+            # acceleration for positive left-right differential. Invert the
+            # geometric command so a positive heading/cross-track error turns
+            # back toward the route instead of amplifying the departure.
+            roll_command = -(
+                self.fixed_wing_nav_heading_gain * heading_error
+                + self.fixed_wing_nav_cross_track_gain * torch.atan(
+                    cross_track / self.fixed_wing_nav_lookahead
+                )
+            ).clamp(
+                -self.fixed_wing_nav_roll_limit,
+                self.fixed_wing_nav_roll_limit,
+            )
+            roll_trim = (
+                self.fixed_wing_stabilizer_roll_gain * roll_command
+            ).clamp(
+                -self.fixed_wing_stabilizer_diff_limit,
+                self.fixed_wing_stabilizer_diff_limit,
+            )
+            policy_common = 0.5 * (action[:, 5] + action[:, 6])
+            policy_diff = 0.5 * (action[:, 5] - action[:, 6])
+            nav_blend = (
+                (cross_track.abs() / max(self.max_cross_track * 0.5, 1.0))
+                .clamp(0.0, 1.0)
+            )
+            differential = (
+                (1.0 - nav_blend) * policy_diff + nav_blend * roll_trim
+            ).clamp(-1.0, 1.0)
+            action[fixed_wing, 5] = (
+                policy_common[fixed_wing] + differential[fixed_wing]
+            ).clamp(-1.0, 1.0)
+            action[fixed_wing, 6] = (
+                policy_common[fixed_wing] - differential[fixed_wing]
+            ).clamp(-1.0, 1.0)
+
+        # Reverse transition still has enough forward airflow for the elevons
+        # to provide useful lateral authority.  Reuse the validated fixed-wing
+        # sign convention, but blend it in more strongly as cross-track error
+        # grows because the rotor re-engagement otherwise weakens the learned
+        # surface command and lets the vehicle drift outside the route.
+        if self.backtransition_nav_enable and torch.any(backtransition):
+            npos, epos, _ = env.model.get_position()
+            _, _, heading = env.model.get_posture()
+            cross_track = (
+                -(npos - self.start_n) * self.route_unit_e
+                + (epos - self.start_e) * self.route_unit_n
+            )
+            heading_error = wrap_PI(self.route_heading - heading)
+            roll_command = -(
+                self.backtransition_nav_heading_gain * heading_error
+                + self.backtransition_nav_cross_track_gain * torch.atan(
+                    cross_track / self.backtransition_nav_lookahead
+                )
+            ).clamp(
+                -self.backtransition_nav_roll_limit,
+                self.backtransition_nav_roll_limit,
+            )
+            roll_trim = (
+                self.fixed_wing_stabilizer_roll_gain * roll_command
+            ).clamp(
+                -self.backtransition_nav_diff_limit,
+                self.backtransition_nav_diff_limit,
+            )
+            policy_common = 0.5 * (action[:, 5] + action[:, 6])
+            policy_diff = 0.5 * (action[:, 5] - action[:, 6])
+            nav_blend = (
+                (cross_track.abs() / max(self.max_cross_track * 0.35, 1.0))
+                .clamp(0.0, 1.0)
+            )
+            differential = (
+                (1.0 - nav_blend) * policy_diff + nav_blend * roll_trim
+            ).clamp(-1.0, 1.0)
+            action[backtransition, 5] = (
+                policy_common[backtransition] + differential[backtransition]
+            ).clamp(-1.0, 1.0)
+            action[backtransition, 6] = (
+                policy_common[backtransition] - differential[backtransition]
+            ).clamp(-1.0, 1.0)
+
+            if self.backtransition_stabilizer_enable:
+                roll, pitch, _ = env.model.get_posture()
+                p, q, _ = env.model.get_angular_velocity()
+                attitude_mag = torch.maximum(roll.abs(), pitch.abs())
+                stabilizer_blend = (
+                    (attitude_mag - self.backtransition_stabilizer_start)
+                    / (
+                        self.backtransition_stabilizer_full
+                        - self.backtransition_stabilizer_start
+                    )
+                ).clamp(0.0, 1.0)
+                stabilizer_roll = (
+                    self.backtransition_stabilizer_roll_gain * roll
+                    + self.backtransition_stabilizer_roll_rate_gain * p
+                ).clamp(
+                    -self.backtransition_stabilizer_diff_limit,
+                    self.backtransition_stabilizer_diff_limit,
+                )
+                stabilizer_pitch = (
+                    -self.backtransition_stabilizer_pitch_gain * pitch
+                    - self.backtransition_stabilizer_pitch_rate_gain * q
+                ).clamp(
+                    -self.backtransition_stabilizer_common_limit,
+                    self.backtransition_stabilizer_common_limit,
+                )
+                common = (
+                    (1.0 - stabilizer_blend) * policy_common
+                    + stabilizer_blend * stabilizer_pitch
+                ).clamp(-1.0, 1.0)
+                differential = (
+                    (1.0 - stabilizer_blend) * differential
+                    + stabilizer_blend * stabilizer_roll
+                ).clamp(-1.0, 1.0)
+                action[backtransition, 5] = (
+                    common[backtransition] + differential[backtransition]
+                ).clamp(-1.0, 1.0)
+                action[backtransition, 6] = (
+                    common[backtransition] - differential[backtransition]
+                ).clamp(-1.0, 1.0)
+                action[backtransition, 7] = (
+                    (1.0 - stabilizer_blend[backtransition])
+                    * action[backtransition, 7]
+                    + stabilizer_blend[backtransition]
+                    * stabilizer_pitch[backtransition]
+                ).clamp(-1.0, 1.0)
+
+        # During forward transition use a speed-dependent pusher ceiling.  A
+        # neutral normalized action maps to roughly half throttle in the
+        # actuator model; allowing it unchanged can accelerate past the
+        # transition envelope before the policy has learned to unload.
+        transition = self.phase == self.TRANSITION
+        if torch.any(transition):
+            forward_speed = env.model.s[:, 6].clamp_min(0.0)
+            speed_fraction = (
+                (forward_speed - self.transition_speed)
+                / (self.transition_pusher_speed_limit - self.transition_speed)
+            ).clamp(0.0, 1.0)
+            pusher_cap = self.transition_pusher_max_action + speed_fraction * (
+                self.transition_pusher_high_speed_action
+                - self.transition_pusher_max_action
+            )
+            action[transition, 4] = torch.minimum(
+                action[transition, 4], pusher_cap[transition]
+            )
+
+        fixed_wing = self.phase == self.FIXED_WING
+        if torch.any(fixed_wing):
+            _, _, altitude = env.model.get_position()
+            contact = env.model.get_ground_contact_state()
+            recovery_fraction = (
+                (altitude - self.min_cruise_altitude)
+                / (self.fixed_wing_pusher_recovery_altitude
+                   - self.min_cruise_altitude)
+            ).clamp(0.0, 1.0)
+            recovery_cap = (
+                self.fixed_wing_pusher_recovery_action
+                + recovery_fraction * (
+                    self.fixed_wing_pusher_max_action
+                    - self.fixed_wing_pusher_recovery_action
+                )
+            )
+            # A manually forced fixed-wing phase at rest is still a ground
+            # state; do not apply the in-flight low-altitude pusher recovery
+            # cap before the contact state has cleared.
+            recovery_cap = torch.where(
+                contact['on_ground'],
+                torch.full_like(recovery_cap, self.fixed_wing_pusher_max_action),
+                recovery_cap,
+            )
+            action[fixed_wing, 4] = torch.minimum(
+                action[fixed_wing, 4],
+                recovery_cap[fixed_wing],
+            )
+
+        # Re-engage the lift rotors gradually during reverse transition.  This
+        # removes the burden of discovering a four-rotor collective from the
+        # very sparse landing signal while retaining learned surface control.
+        if torch.any(backtransition):
+            npos, epos, altitude = env.model.get_position()
+            _, _, vel_up = env.model.get_world_velocity()
+            distance = torch.sqrt(
+                (npos - self.landing_n) ** 2
+                + (epos - self.landing_e) ** 2
+            )
+            distance_fraction = (
+                (distance - self.descent_capture_radius)
+                / (self.approach_distance - self.descent_capture_radius)
+            ).clamp(0.0, 1.0)
+            nominal_altitude = (
+                self.landing_hover_altitude
+                + distance_fraction * (
+                    self.cruise_altitude - self.landing_hover_altitude
+                )
+            )
+            motor_constant = float(env.model.dynamics.motor_constant[0])
+            hover_omega = torch.sqrt(
+                (
+                    env.model.mass_curr * env.model.dynamics.g
+                    / (4.0 * max(motor_constant, 1.0e-8))
+                ).clamp_min(0.0)
+            )
+            rotor_scale = env.model.motor_cmd_scaling[0]
+            if env.model.action_is_gazebo_control:
+                hover_action = hover_omega / rotor_scale
+            else:
+                hover_action = 2.0 * hover_omega / rotor_scale - 1.0
+            altitude_error = nominal_altitude - altitude
+            target_sink = -torch.minimum(
+                torch.full_like(altitude, self.backtransition_target_sink_speed),
+                0.18 * torch.sqrt(
+                    (nominal_altitude - self.landing_hover_altitude).clamp_min(0.0)
+                ),
+            )
+            lift_target = (
+                hover_action
+                + self.backtransition_altitude_gain * altitude_error
+                + self.backtransition_velocity_gain * (target_sink - vel_up)
+            ).clamp(-1.0, 1.0)
+            action[backtransition, 0:4] = lift_target[backtransition].reshape(-1, 1)
+
+            # Ramp an air-brake/parasitic drag coefficient only in the final
+            # reverse-transition corridor. This supplies physical braking
+            # authority while retaining the strict low-speed capture gate.
+            drag_fraction = (
+                (self.backtransition_extra_drag_start_distance - distance)
+                / (
+                    self.backtransition_extra_drag_start_distance
+                    - self.descent_capture_radius
+                )
+            ).clamp(0.0, 1.0)
+            # The dynamics object is shared by the whole GPU batch.  Always
+            # write a per-environment tensor, including zeros for non-back-
+            # transition environments, otherwise one reverse-transition
+            # vehicle leaks its air-brake coefficient into every other phase.
+            drag_coefficient = torch.where(
+                backtransition,
+                self.backtransition_extra_drag_coefficient * drag_fraction,
+                torch.zeros_like(distance),
+            )
+            if hasattr(env.model.dynamics, 'extra_drag_coefficient'):
+                env.model.dynamics.extra_drag_coefficient = drag_coefficient
+        elif hasattr(env.model.dynamics, 'extra_drag_coefficient'):
+            env.model.dynamics.extra_drag_coefficient = torch.zeros(
+                self.n, device=self.device
+            )
+
+        if self.gate_backtransition_pusher:
+            npos, epos, _ = env.model.get_position()
+            vel_n, vel_e, _ = env.model.get_world_velocity()
+            distance = torch.sqrt(
+                (npos - self.landing_n) ** 2
+                + (epos - self.landing_e) ** 2
+            )
+            horizontal_speed = torch.sqrt(
+                (vel_n * vel_n + vel_e * vel_e).clamp_min(0.0)
+            )
+            distance_fraction = (
+                (distance - self.descent_capture_radius)
+                / (self.approach_distance - self.descent_capture_radius)
+            ).clamp(0.0, 1.0)
+            speed_fraction = (
+                horizontal_speed / self.backtransition_speed
+            ).clamp(0.0, 1.0)
+            # Reverse transition is a braking phase. A full pusher command at
+            # the early approach gate would preserve cruise speed and repeatedly hit
+            # the high-speed boundary, so only a small residual fraction is
+            # permitted and it tapers to zero at the capture radius.
+            pusher_fraction = (
+                self.backtransition_pusher_max_fraction
+                * torch.minimum(distance_fraction, speed_fraction)
+            )
+            if env.model.action_is_gazebo_control:
+                pusher_cap = pusher_fraction
+            else:
+                # Convert the desired fraction of maximum pusher speed back
+                # through GazeboModel's [-1, 1] action mapping.
+                max_command_fraction = (
+                    env.model.motor_omega_max[4]
+                    / env.model.motor_cmd_scaling[4]
+                )
+                pusher_cap = (
+                    2.0 * pusher_fraction * max_command_fraction - 1.0
+                )
+            # The raw action cap is useful for policy diagnostics.  The model
+            # also receives a physical (omega) cap and reapplies it after the
+            # action filter, so stale filtered commands cannot bypass this
+            # safety limit.
+            if hasattr(env.model, 'pusher_omega_cap'):
+                inf = torch.full_like(pusher_fraction, float('inf'))
+                env.model.pusher_omega_cap = torch.where(
+                    backtransition,
+                    pusher_fraction * env.model.motor_omega_max[4],
+                    inf,
+                )
+            action[:, 4] = torch.where(
+                backtransition,
+                torch.minimum(action[:, 4], pusher_cap),
+                action[:, 4],
+            )
         return action
+
+    def aero_envelope_active(self, env):
+        """Return where fixed-wing aerodynamic angles are meaningful."""
+        # During early forward transition the lift rotors still carry the
+        # aircraft, so a large wing alpha/beta is not itself a loss of control.
+        # Apply the hard wing envelope only after transition airspeed is
+        # reached.  In wing-borne phases retain the lower threshold so a stall
+        # remains terminal, while reverse body flow never counts as useful
+        # forward airflow.
+        forward_airspeed = env.model.s[:, 6]
+        transition_wingborne = (
+            (self.phase == self.TRANSITION)
+            & (
+                forward_airspeed
+                >= self.transition_aero_envelope_min_forward_speed
+            )
+        )
+        # Once reverse transition begins, rotor lift is being re-established
+        # and the fixed-wing alpha/beta model is no longer a reliable hard
+        # safety boundary.  Keep the independent attitude, rate, speed and
+        # ground-contact limits active there, but do not terminate on a stale
+        # wing angle while the vehicle is reconfiguring.
+        phase_elapsed = env.step_count - self.phase_entry_step
+        fixed_wing_ready = phase_elapsed >= self.fixed_wing_aero_grace_steps
+        wingborne_phase = (
+            (self.phase == self.FIXED_WING)
+            & fixed_wing_ready
+        )
+        return transition_wingborne | (
+            wingborne_phase
+            & (forward_airspeed >= self.aero_envelope_min_forward_speed)
+        )
 
     def _waypoint_distance(self, env):
         npos, epos, altitude = env.model.get_position()
@@ -414,7 +1622,7 @@ class VTOLMissionTask(BaseTask):
             (npos - self.landing_n) ** 2 + (epos - self.landing_e) ** 2
         ).detach()
         self.metric_gps_age = env.model.get_gps_state()['age'].detach()
-        self.training_success_count += self.landing_success(env).sum()
+        self.training_success_count += self.mission_success(env).sum()
         self.training_failure_count += env.bad_done.sum()
 
     def get_training_metrics(self):
@@ -424,6 +1632,7 @@ class VTOLMissionTask(BaseTask):
             'mission/gps_age_mean': self.metric_gps_age.mean(),
             'mission/success_count': self.training_success_count,
             'mission/failure_count': self.training_failure_count,
+            'mission/reward_constraint_penalty_mean': self.constraint_penalty.mean(),
         }
         for phase_id, phase_name in enumerate(self.PHASE_NAMES):
             metrics[f'mission/phase_{phase_name}_fraction'] = (
@@ -432,6 +1641,25 @@ class VTOLMissionTask(BaseTask):
             metrics[f'mission/start_{phase_name}_fraction'] = (
                 self.start_phase == phase_id
             ).float().mean()
+            if phase_id > 0:
+                metrics[f'mission/reach_{phase_name}_count'] = (
+                    self.rollout_phase_reach_count[phase_id]
+                )
+                metrics[f'mission/reach_{phase_name}_rate'] = (
+                    self.rollout_phase_reach_count[phase_id]
+                    / self.rollout_episode_opportunities.clamp_min(1.0)
+                )
+        metrics['mission/rollout_episode_opportunities'] = (
+            self.rollout_episode_opportunities
+        )
+        if self.terminal_mode == 'hover':
+            metrics['mission/hover_stable_fraction'] = (
+                self.hover_stable_candidate(self._env_ref).float().mean()
+            )
+            metrics['mission/hover_hold_progress_mean'] = (
+                self.hover_stable_count.to(torch.float32)
+                / float(self.hover_hold_steps)
+            ).clamp(0.0, 1.0).mean()
         return metrics
 
     def landing_success(self, env):
@@ -462,6 +1690,17 @@ class VTOLMissionTask(BaseTask):
             & (roll.abs() <= max_tilt)
             & (pitch.abs() <= max_tilt)
         )
+
+    def hover_success(self, env):
+        return (
+            self.hover_stable_candidate(env)
+            & (self.hover_stable_count >= self.hover_hold_steps)
+        )
+
+    def mission_success(self, env):
+        if self.terminal_mode == 'hover':
+            return self.hover_success(env)
+        return self.landing_success(env)
 
     def _build_obs(self, env, clean=False):
         if clean:
@@ -501,7 +1740,12 @@ class VTOLMissionTask(BaseTask):
 
         landing_dn = self.landing_n - npos
         landing_de = self.landing_e - epos
-        landing_dalt = self.landing_altitude - altitude
+        terminal_altitude = (
+            self.landing_hover_altitude
+            if self.terminal_mode == 'hover'
+            else self.landing_altitude
+        )
+        landing_dalt = terminal_altitude - altitude
         waypoint_dn = self.target_npos - npos
         waypoint_de = self.target_epos - epos
         waypoint_dalt = self.target_altitude - altitude
@@ -574,3 +1818,55 @@ class VTOLMissionTask(BaseTask):
 
     def get_clean_obs(self, env):
         return self._build_obs(env, clean=True)
+
+    def get_critic_obs(self, env):
+        """Privileged simulator state used only by the asymmetric critic."""
+        clean_obs = self.get_clean_obs(env)
+        state = env.model.s.clone()
+        state[:, 0] = (state[:, 0] - self.start_n) / self.distance_norm
+        state[:, 1] = (state[:, 1] - self.start_e) / self.distance_norm
+        state[:, 2] /= self.altitude_norm
+        state[:, 3:6] /= math.pi
+        state[:, 6:9] /= self.speed_norm
+        state[:, 9:12] /= self.rate_norm
+
+        contact = env.model.get_ground_contact_state()
+        mass_weight = (env.model.mass_curr * env.model.dynamics.g).clamp_min(1e-6)
+        max_penetration = max(float(getattr(
+            self.config, 'ground_crash_max_penetration', 0.05
+        )), 1e-6)
+        max_touchdown = max(float(getattr(
+            self.config, 'ground_crash_max_touchdown_speed', 1.5
+        )), 1e-6)
+        settle_steps = max(int(getattr(
+            self.config, 'mission_landing_settle_steps', 15
+        )), 1)
+        acceleration_limit = max(float(getattr(
+            self.config, 'acceleration_limit', 35.0
+        )), 1e-6)
+        body_acceleration = (
+            env.model.s[:, 6:9] - env.model.recent_s[:, 6:9]
+        ) / max(self.dt, 1e-6)
+        acceleration_ratio = torch.linalg.vector_norm(
+            body_acceleration, dim=1
+        ) / acceleration_limit
+        dwell = self.phase_min_steps[self.phase].clamp_min(1)
+        phase_elapsed = env.step_count - self.phase_entry_step
+
+        privileged = torch.hstack((
+            clean_obs,
+            state,
+            (contact['normal_force'] / mass_weight).clamp(0.0, 50.0).reshape(-1, 1),
+            (contact['max_penetration'] / max_penetration).clamp(0.0, 10.0).reshape(-1, 1),
+            (contact['touchdown_vertical_speed'] / max_touchdown).clamp(0.0, 10.0).reshape(-1, 1),
+            (contact['last_touchdown_vertical_speed'] / max_touchdown).clamp(0.0, 10.0).reshape(-1, 1),
+            (contact['contact_duration_steps'].to(state.dtype) / settle_steps).clamp(0.0, 10.0).reshape(-1, 1),
+            acceleration_ratio.clamp(0.0, 10.0).reshape(-1, 1),
+            (phase_elapsed.to(state.dtype) / dwell).clamp(0.0, 2.0).reshape(-1, 1),
+        ))
+        if privileged.shape[1] != self.CRITIC_OBSERVATION_SIZE:
+            raise RuntimeError(
+                f'VTOL critic observation has {privileged.shape[1]} values, '
+                f'expected {self.CRITIC_OBSERVATION_SIZE}'
+            )
+        return torch.nan_to_num(privileged, nan=0.0, posinf=10.0, neginf=-10.0)

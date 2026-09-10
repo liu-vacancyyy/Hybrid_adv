@@ -18,7 +18,7 @@ class ExtremeState(BaseTerminationCondition):
         self.min_beta = getattr(config, 'min_beta', -30)
         self.max_beta = getattr(config, 'max_beta', 30)
 
-    def get_termination(self, task, env, info={}):
+    def get_termination(self, task, env, info=None):
         """
         Return whether the episode should terminate.
         End up the simulation if the aircraft is on an extreme state.
@@ -29,13 +29,22 @@ class ExtremeState(BaseTerminationCondition):
         Returns:
             (tuple): (bad_done, done, exceed_time_limit, info)
         """
+        if info is None:
+            info = {}
         alpha = env.model.get_AOA() * 180 / torch.pi
         beta = env.model.get_AOS() * 180 / torch.pi
         mask1 = (alpha < self.min_alpha) | (alpha > self.max_alpha)
         mask2 = (beta < self.min_beta) | (beta > self.max_beta)
-        bad_done = mask1 | mask2
+        violation = mask1 | mask2
+        if hasattr(task, 'aero_envelope_active'):
+            envelope_active = task.aero_envelope_active(env)
+        else:
+            envelope_active = torch.ones_like(violation)
+        bad_done = envelope_active & violation
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
+        info['aero_envelope_active'] = envelope_active
+        info['extreme_aero_state'] = bad_done
         if getattr(self.config, 'termination_verbose', True) and torch.any(bad_done):
             self.log(f'extreme state!')
             print(torch.sum(bad_done), 'extreme state!')

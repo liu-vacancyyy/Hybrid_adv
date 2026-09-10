@@ -89,6 +89,10 @@ class GPUVecEnv(VecEnv):
         assert hasattr(self.gpu_vec_env, "num_envs"), "Parameter of env must contain num_envs!"
         super().__init__(self.gpu_vec_env.num_envs, self.gpu_vec_env.observation_space, self.gpu_vec_env.action_space)
         self.agents = self.gpu_vec_env.num_agents
+        self.use_privileged_critic = bool(
+            getattr(self.gpu_vec_env.task, 'use_privileged_critic', False)
+        )
+        self.critic_observation_space = self.gpu_vec_env.critic_observation_space
         self.auto_reset_on_done = bool(getattr(
             self.gpu_vec_env.config, 'vec_auto_reset_on_done', False
         ))
@@ -134,6 +138,14 @@ class GPUVecEnv(VecEnv):
         obs = torch.reshape(obs, (self.num_envs, self.agents, self.gpu_vec_env.num_observation))
         obs = _t2n(obs)
         return obs
+
+    def critic_obs(self):
+        obs = self.gpu_vec_env.critic_obs()
+        obs = torch.reshape(
+            obs,
+            (self.num_envs, self.agents, self.gpu_vec_env.num_critic_observation),
+        )
+        return _t2n(obs)
 
     def step_async(self, actions):
         pass

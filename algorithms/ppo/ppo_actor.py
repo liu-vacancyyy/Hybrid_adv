@@ -32,7 +32,15 @@ class PPOActor(nn.Module):
             self.rnn = GRULayer(input_size, self.recurrent_hidden_size, self.recurrent_hidden_layers)
             input_size = self.rnn.output_size
         # (3) act module
-        self.act = ACTLayer(act_space, input_size, self.act_hidden_size, self.activation_id, self.gain)
+        self.act = ACTLayer(
+            act_space,
+            input_size,
+            self.act_hidden_size,
+            self.activation_id,
+            self.gain,
+            action_log_std_init=getattr(args, 'action_log_std_init', 0.0),
+            action_mean_init=getattr(args, 'action_mean_init', None),
+        )
         if self.use_safety_aux:
             self.safety_out = nn.Linear(input_size, 1)
 

@@ -13,6 +13,7 @@ class Overload(BaseTerminationCondition):
 
     def __init__(self, config):
         super().__init__(config)
+        self.config = config
         self.acceleration_limit = float(getattr(config, 'acceleration_limit', 5.0))
         self.persist_steps = max(1, int(getattr(
             config, 'overload_bad_done_persist_steps', 1
@@ -46,6 +47,9 @@ class Overload(BaseTerminationCondition):
         bad_done = self.violation_count >= self.persist_steps
         done = torch.zeros_like(bad_done)
         exceed_time_limit = torch.zeros_like(bad_done)
+        if info is None:
+            info = {}
+        info['overload'] = bad_done
         if getattr(self.config, 'termination_verbose', True) and torch.any(bad_done):
             self.log(f'acceleration is too high!')
             print(torch.sum(bad_done), 'acceleration is too high!')
@@ -65,5 +69,28 @@ class Overload(BaseTerminationCondition):
         ax, ay, az = env.model.get_acceleration()
         acceleration = ax ** 2 + ay ** 2 + az ** 2
         acceleration = torch.sqrt(acceleration)
-        flag_overload = (acceleration - self.acceleration_limit) > 0
+        limit = self.acceleration_limit
+        # Reverse transition deliberately blends rotor and wing forces and can
+        # create a short high-g transient while the aircraft reconfigures. Use
+        # a bounded, phase-specific envelope rather than terminating a valid
+        # transition at the nominal cruise limit.
+        if hasattr(env, 'task'):
+            backtransition = env.task.phase == getattr(env.task, 'BACK_TRANSITION', -1)
+            transition = env.task.phase == getattr(env.task, 'TRANSITION', -1)
+            back_limit = float(getattr(
+                self.config, 'mission_backtransition_acceleration_limit', limit
+            ))
+            transition_limit = float(getattr(
+                self.config, 'mission_transition_acceleration_limit', limit
+            ))
+            limit_tensor = torch.full_like(acceleration, limit)
+            limit_tensor = torch.where(
+                transition, torch.full_like(acceleration, transition_limit), limit_tensor
+            )
+            limit_tensor = torch.where(
+                backtransition, torch.full_like(acceleration, back_limit), limit_tensor
+            )
+        else:
+            limit_tensor = torch.full_like(acceleration, limit)
+        flag_overload = acceleration > limit_tensor
         return flag_overload
